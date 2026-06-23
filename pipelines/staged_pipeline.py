@@ -8,7 +8,10 @@ import pandas as pd
 from fusion.classifier_bridge import run_classifier_pipeline
 from fusion.contracts import infer_period, standardize_prediction_table
 from fusion.run_fixed_window_fusion import _apply_fixed_weights
+from fusion.meta_learner_v3 import fit_meta_learners_from_long_table, apply_meta_learners
+from fusion.spike_detector import SpikeDetector, SpikeDetectorConfig
 from fusion.weights import fit_weights_from_long_table
+from fusion.metrics import smape_floor50
 from runners.registry import get_model_pipeline
 from utils.daily_run_layout import build_daily_run_layout
 
@@ -299,13 +302,23 @@ def run_learner_stage(args):
     root = _resolve_daily_runs_root(args)
     outputs: list[str] = []
 
+    spike_detector = None
+    raw_df = None
+    try:
+        raw_df = pd.read_excel(args.data_path, engine="openpyxl")
+        raw_df["时刻"] = pd.to_datetime(raw_df["时刻"])
+        spike_detector = SpikeDetector(SpikeDetectorConfig())
+        spike_detector.fit(raw_df)
+        logger.info("SpikeDetector trained on %d rows", len(raw_df))
+    except Exception as exc:
+        logger.warning("SpikeDetector training failed: %s", exc)
+
     for target in targets:
         layout = build_daily_run_layout(root, run_date, target)
         val_df = _collect_stage_predictions(layout, file_name="val_predictions.csv")
         raw_val_path = layout.learner_inputs_dir / "validation_predictions.csv"
         val_df.to_csv(raw_val_path, index=False, encoding="utf-8-sig")
 
-        # Report which models are included in fusion
         included_models = sorted(val_df["model_name"].dropna().unique().tolist()) if "model_name" in val_df.columns else []
         model_row_counts = {}
         if "model_name" in val_df.columns:
@@ -323,21 +336,46 @@ def run_learner_stage(args):
         contract_path = layout.learner_inputs_dir / "validation_long_table.csv"
         contract_df.to_csv(contract_path, index=False, encoding="utf-8-sig")
 
-        weights_df, report_df = fit_weights_from_long_table(
-            contract_df,
-            reg=0.1,
-            lower_bound=float(getattr(args, "weight_lower_bound", -0.5)),
-            upper_bound=float(getattr(args, "weight_upper_bound", 1.2)),
-        )
-        if weights_df.empty:
-            raise RuntimeError(f"No learner weights produced for {target}/{run_date}")
-        weights_df = _ensure_complete_period_weights(weights_df, contract_df, target=target)
+        if spike_detector is not None and raw_df is not None:
+            try:
+                spike_probs = spike_detector.predict_spike_probability(raw_df)
+                spike_labels = spike_detector.predict(raw_df, use_momentum=True)
+                spike_df = raw_df[["时刻"]].copy()
+                spike_df["spike_prob"] = spike_probs.values
+                spike_df["is_spike"] = spike_labels.values
+                spike_path = layout.learner_inputs_dir / "spike_predictions.csv"
+                spike_df.to_csv(spike_path, index=False, encoding="utf-8-sig")
+                outputs.append(str(spike_path))
+                logger.info("Spike predictions saved: %s", spike_path)
+            except Exception as exc:
+                logger.warning("Spike prediction failed: %s", exc)
 
-        weights_path = layout.learner_outputs_dir / "weights.csv"
+        models_meta, report_df = fit_meta_learners_from_long_table(
+            contract_df,
+            n_estimators=100,
+            max_depth=3,
+            learning_rate=0.1,
+            subsample=0.8,
+            min_samples_leaf=20,
+            cv_folds=3,
+        )
+
+        meta_learner_path = layout.learner_outputs_dir / "meta_learner.joblib"
+        joblib.dump(models_meta, meta_learner_path)
+
         report_path = layout.learner_outputs_dir / "fit_report.csv"
-        weights_df.to_csv(weights_path, index=False, encoding="utf-8-sig")
         report_df.to_csv(report_path, index=False, encoding="utf-8-sig")
-        outputs.extend([str(weights_path), str(report_path)])
+        outputs.extend([str(meta_learner_path), str(report_path)])
+
+        for key, seg in models_meta.items():
+            logger.info(
+                "  period=%s best_single=%s(%.2f%%) cv_smape=%.2f%% use_learner=%s",
+                key[1], seg.best_single_model, seg.best_single_smape,
+                report_df[report_df["period"] == key[1]]["cv_smape"].values[0]
+                if len(report_df[report_df["period"] == key[1]]) > 0 else 0.0,
+                report_df[report_df["period"] == key[1]]["use_learner"].values[0]
+                if len(report_df[report_df["period"] == key[1]]) > 0 else False,
+            )
 
     return outputs
 

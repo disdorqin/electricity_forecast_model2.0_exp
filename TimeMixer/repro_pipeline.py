@@ -1346,7 +1346,8 @@ def train_model(
         dropout=cfg.dropout,
         segment_head_mode=segment_head_mode,
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=cfg.lr * 0.01)
     best_state = None
     best_valid = float("inf")
     patience_left = cfg.patience
@@ -1423,10 +1424,10 @@ def train_model(
         batch_normal_focus_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if task == "rt" and cfg.rt_loss_mode == "risk_hour_weighted":
-            per_step = torch.abs(pred - target)
+            per_step = torch.nn.functional.huber_loss(pred, target, reduction="none", delta=50.0)
             return (per_step * risk_weight).mean()
         if task == "rt" and cfg.rt_loss_mode == "risk_peak_weighted":
-            per_step = torch.abs(pred - target) * risk_weight.reshape(1, -1)
+            per_step = torch.nn.functional.huber_loss(pred, target, reduction="none", delta=50.0) * risk_weight.reshape(1, -1)
             if batch_peak_weight is not None:
                 per_step = per_step * batch_peak_weight
             if batch_normal_focus_weight is not None:
@@ -1439,7 +1440,7 @@ def train_model(
             if da_hour_weight is not None:
                 asym_weight = asym_weight * da_hour_weight.reshape(1, -1)
             return (per_step * asym_weight).mean()
-        return torch.abs(pred - target).mean()
+        return torch.nn.functional.huber_loss(pred, target, reduction="mean", delta=50.0)
 
     # === AMP 混合精度(依据 docs/项目提高速度.md)===
     _use_amp = _use_cuda and _os.getenv("OPTIM_AMP", "1") == "1"
@@ -1518,6 +1519,7 @@ def train_model(
             patience_left -= 1
             if patience_left <= 0:
                 break
+        scheduler.step()
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -1569,9 +1571,13 @@ def restore_target_from_mode(
 def evaluate_metrics(pred_df: pd.DataFrame, task: str) -> pd.DataFrame:
     pred_col = "y_pred"
     true_col = "y_true"
+    valid_df = pred_df.dropna(subset=[pred_col, true_col]).copy()
     rows = []
     for period in ["overall", "1_8", "9_16", "17_24"]:
-        sub = pred_df if period == "overall" else pred_df[pred_df["period"] == period]
+        sub = valid_df if period == "overall" else valid_df[valid_df["period"] == period]
+        if sub.empty:
+            rows.append({"task": task, "period": period, "n": 0, "MAE": np.nan, "MSE": np.nan, "RMSE": np.nan, "R2": np.nan, "sMAPE": np.nan})
+            continue
         pred = sub[pred_col].to_numpy(float)
         true = sub[true_col].to_numpy(float)
         mse = float(np.mean((pred - true) ** 2))

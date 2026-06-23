@@ -24,10 +24,61 @@ class MovingAvg(nn.Module):
         return seasonal, trend
 
 
+class TemporalSelfAttention(nn.Module):
+    def __init__(self, hidden_dim: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            hidden_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        h, _ = self.attn(h, h, h)
+        x = x + self.drop(h)
+        x = x + self.drop(self.ffn(self.norm2(x)))
+        return x
+
+
+class CrossAttention(nn.Module):
+    def __init__(self, hidden_dim: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            hidden_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.norm_q = nn.LayerNorm(hidden_dim)
+        self.norm_kv = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, query: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        q = self.norm_q(query)
+        k = self.norm_kv(kv)
+        h, _ = self.attn(q, k, k)
+        query = query + self.drop(h)
+        query = query + self.drop(self.ffn(self.norm2(query)))
+        return query
+
+
 class PastDecomposableMixing(nn.Module):
-    def __init__(self, hidden_dim: int, scales: int = 3, dropout: float = 0.1):
+    def __init__(self, hidden_dim: int, scales: int = 3, dropout: float = 0.1, use_attention: bool = False):
         super().__init__()
         self.decomp = MovingAvg(kernel_size=25)
+        self.use_attention = use_attention
         self.season_mlps = nn.ModuleList(
             [
                 nn.Sequential(
@@ -51,6 +102,8 @@ class PastDecomposableMixing(nn.Module):
             ]
         )
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(scales)])
+        if use_attention:
+            self.attention = TemporalSelfAttention(hidden_dim, n_heads=4, dropout=dropout)
 
     def forward(self, xs: list[torch.Tensor]) -> list[torch.Tensor]:
         outs = []
@@ -72,7 +125,10 @@ class PastDecomposableMixing(nn.Module):
                     align_corners=False,
                 ).transpose(1, 2)
             y = self.season_mlps[i](s) + self.trend_mlps[i](t)
-            outs.append(self.norms[i](x + y))
+            out = self.norms[i](x + y)
+            if self.use_attention:
+                out = self.attention(out)
+            outs.append(out)
             prev_s, prev_t = s, t
         return outs
 
@@ -92,14 +148,27 @@ class TimeMixerBackbone(nn.Module):
         super().__init__()
         self.scales = scales
         self.segment_head_mode = segment_head_mode
-        self.past_proj = nn.Linear(past_dim, hidden_dim)
-        self.future_proj = nn.Linear(future_dim, hidden_dim)
+        self.past_proj = nn.Sequential(
+            nn.Linear(past_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.future_proj = nn.Sequential(
+            nn.Linear(future_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
         self.blocks = nn.ModuleList(
             [
-                PastDecomposableMixing(hidden_dim, scales=scales, dropout=dropout)
+                PastDecomposableMixing(hidden_dim, scales=scales, dropout=dropout, use_attention=True)
                 for _ in range(n_blocks)
             ]
         )
+        self.past_future_cross = CrossAttention(hidden_dim, n_heads=4, dropout=dropout)
         self.future_mixer = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
@@ -108,7 +177,11 @@ class TimeMixerBackbone(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         self.head = nn.Sequential(
+            nn.LayerNorm(hidden_dim * (scales + 1)),
             nn.Linear(hidden_dim * (scales + 1), hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, pred_len),
@@ -147,6 +220,8 @@ class TimeMixerBackbone(nn.Module):
         pooled = [s.mean(dim=1) for s in xs]
         future = self.future_proj(future_x)
         future = future + self.future_mixer(future)
+        past_summary = x.mean(dim=1, keepdim=True).expand_as(future)
+        future = self.past_future_cross(future, past_summary)
         z = torch.cat(pooled + [future.mean(dim=1)], dim=-1)
         out = self.head(z)
         if self.segment_head_mode == "future_residual":

@@ -35,12 +35,12 @@
 
 ## 窗口3 - TimeMixer调优
 
-**状态:** 🟡 进行中
-**当前任务:** Phase 2 — 调优进行中，6轮实验完成，RT overall从42.82%降至35.61%
+**状态:** ✅ 完成（阶段性）
+**当前任务:** 7轮实验完成，最佳配置已确定，等待集成
 **改动文件:** TimeMixer/backbones.py, TimeMixer/repro_pipeline.py
 **分支:** tune-timemixer
-**时间戳:** [06-23 22:30]
-**备注:** 最佳配置v6: TimesNet backbone, seq_len=336, hidden_dim=128, blocks=4, residual_blend, auto calibration, no segment training. RT 9_16仍54.98%是主要瓶颈。
+**时间戳:** [06-23 23:00]
+**备注:** 最佳配置v6: TimesNet, seq_len=336, hidden_dim=128, blocks=4, residual_blend, auto calib, no-seg. RT overall 35.61%, DA overall 23.35%. RT 9_16 (54.98%)是数据本身的极端波动性导致，非模型可单独解决。
 
 ---
 

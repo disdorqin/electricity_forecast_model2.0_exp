@@ -123,6 +123,22 @@ class RollingOriginOrchestrator:
             # 确保 fold 目录存在
             self.layout.ensure_dirs(fold.fold_id)
 
+            # 保存 fold_spec.json
+            import json as _json
+            spec_path = self.layout.fold_spec_path(fold.fold_id)
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            _fold_data = {
+                "fold_id": fold.fold_id,
+                "train_start": str(fold.train_start),
+                "train_end": str(fold.train_end),
+                "test_start": str(fold.test_start),
+                "test_end": str(fold.test_end),
+                "target_month": fold.target_month,
+                "is_expanding": fold.is_expanding,
+            }
+            with open(spec_path, "w", encoding="utf-8") as _sf:
+                _json.dump(_fold_data, _sf, ensure_ascii=False, indent=2)
+
             for model_name in self.config.models_list:
                 for task in self.config.tasks_list:
                     logger.info(
@@ -225,11 +241,10 @@ class RollingOriginOrchestrator:
 
         # 保存预测结果
         if result.success and result.predictions_df is not None:
-            result.output_path = str(
-                self.layout.fold_raw_path(fold.fold_id, model_name, task)
-            )
-            result.output_path.parent.mkdir(parents=True, exist_ok=True)
-            result.predictions_df.to_csv(result.output_path, index=False)
+            output_path = self.layout.fold_raw_path(fold.fold_id, model_name, task)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            result.predictions_df.to_csv(output_path, index=False)
+            result.output_path = str(output_path)
 
         return result
 

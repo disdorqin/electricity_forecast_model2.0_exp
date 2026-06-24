@@ -22,7 +22,7 @@ from rolling_oof.contracts import FoldResult, FoldSpec
 logger = logging.getLogger(__name__)
 
 # 项目根
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -107,9 +107,9 @@ def _run_da_daily_walk_forward(
     参考实时模式 run_precision_simulation 的循环逻辑，
     但使用日前子模型（LGBMPowerPredictorDA + PowerInferenceDA）。
     """
-    from lightGBM.train_da_fix import LGBMPowerPredictorDA
-    from lightGBM.infer_da_fix import PowerInferenceDA
-    from lightGBM.train_da_fix import _fit_dayahead_fixed_window
+    from lightGBM.train_da_fix import LGBMPowerPredictor as LGBMPowerPredictorDA
+    from lightGBM.infer_da_fix import PowerInference as PowerInferenceDA
+    from lightGBM.main_fix import _fit_dayahead_fixed_window
 
     predictor = LGBMPowerPredictorDA()
     inference = PowerInferenceDA(model_path=None)

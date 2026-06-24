@@ -349,8 +349,8 @@ def _check_business_day(
         )
     if "business_day" not in df.columns:
         return AuditCheck(
-            name="business_day", passed=True, severity="info",
-            detail="No business_day column (using target_day)",
+            name="business_day", passed=False, severity="warning",
+            detail="No business_day column present (required for OOF long-table)",
             model_name=model_name, task=task,
         )
     # 基本检查：business_day 不应在 target_day 之后

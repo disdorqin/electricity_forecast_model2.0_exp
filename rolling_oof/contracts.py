@@ -26,6 +26,7 @@ LONG_TABLE_COLUMNS: list[str] = [
     "test_start",
     "test_end",
     "target_day",
+    "business_day",
     "ds",
     "period",
     "hour_business",

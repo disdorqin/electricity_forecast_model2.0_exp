@@ -19,7 +19,7 @@ from rolling_oof.output_layout import OofRunLayout
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -147,13 +147,71 @@ def _predict_one_model(
         if df is None or df.empty:
             return None
 
-        # 标准化
+        # 标准化为 long-table 格式
+        import numpy as np
+        from datetime import datetime as dt
+
+        target_dt = pd.Timestamp(target_date)
+
+        # 确保 ds 列
+        if "ds" not in df.columns and "时刻" in df.columns:
+            df["ds"] = pd.to_datetime(df["时刻"])
+        if "ds" not in df.columns:
+            df["ds"] = None
+
+        # 提取预测列
+        if "y_pred" not in df.columns:
+            for col in ["预测值", "prediction", "y_pred"]:
+                if col in df.columns:
+                    df["y_pred"] = pd.to_numeric(df[col], errors="coerce")
+                    break
+            else:
+                # fallback: 使用第一列数值型数据
+                for col in df.columns:
+                    if col not in ("task", "model_name", "ds", "时刻", "target_day"):
+                        df["y_pred"] = pd.to_numeric(df[col], errors="coerce")
+                        break
+
+        # 标准化字段
         df["task"] = task
         df["model_name"] = model_name
+        df["fold_id"] = -1  # escort 无 fold
+        df["train_start"] = train_start.strftime("%Y-%m-%d")
+        df["train_end"] = (target_dt - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        df["test_start"] = target_date
+        df["test_end"] = target_date
+        df["target_day"] = target_date
         df["source"] = "escort_forecast"
         df["run_mode"] = "escort"
+        df["created_at"] = dt.now().isoformat()
 
-        return df
+        # business_day / period / hour_business
+        if "ds" in df.columns and df["ds"].notna().any():
+            ds_dt = pd.to_datetime(df["ds"])
+            df["hour_business"] = ds_dt.apply(
+                lambda t: 24 if t.hour == 0 else t.hour
+            )
+            df["business_day"] = ds_dt.apply(
+                lambda t: (t - pd.Timedelta(days=1) if t.hour == 0 else t).strftime("%Y-%m-%d")
+            )
+            from rolling_oof.contracts import assign_period
+            df["period"] = df["hour_business"].apply(assign_period)
+        else:
+            df["business_day"] = target_date
+            df["hour_business"] = None
+            df["period"] = None
+
+        # y_true: escort 时不填（未来日无真实值）
+        if "y_true" not in df.columns:
+            df["y_true"] = None
+
+        # 确保所有 contract 列存在
+        from rolling_oof.contracts import LONG_TABLE_COLUMNS
+        for col in LONG_TABLE_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+
+        return df[LONG_TABLE_COLUMNS]
 
     except Exception as e:
         logger.error("[escort] %s/%s: %s", model_name, task, e)

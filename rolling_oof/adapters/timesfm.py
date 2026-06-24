@@ -19,7 +19,7 @@ from rolling_oof.contracts import FoldResult, FoldSpec
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -132,15 +132,67 @@ def _predict_oof_fold(
     """对单个 fold 执行 TimesFM 预测。
 
     Cutoff-safe 策略：
-    1. 构造截止到 cutoff_date 的数据视图
-    2. 用该视图对 start_date..end_date 做推理
-    3. 缓存路径包含 cutoff_date，确保不同 fold 的缓存隔离
+    1. 加载原始数据
+    2. 将 cutoff_date 之后的目标列置为 NaN（防止 TimesFM 上下文看到未来数据）
+    3. 写入临时 cutoff-safe 文件
+    4. 用该文件进行推理
+    5. 记录缓存 manifest
     """
+    import json
+    from datetime import datetime as dt
+
+    cutoff_dt = pd.Timestamp(cutoff_date) + pd.Timedelta(days=1)  # cutoff 次日 00:00
+    cache_file = Path(cache_dir) / f"predictions_{start_date}_{end_date}.csv"
+    manifest_file = Path(cache_dir) / "cache_manifest.json"
+
+    # 检查现有缓存
+    if cache_file.exists():
+        try:
+            cached = pd.read_csv(cache_file)
+            logger.info("[timesfm] Using cached predictions: %s", cache_file)
+            return cached
+        except Exception:
+            logger.warning("[timesfm] Cache corrupted, regenerating")
+
+    # 构造 cutoff-safe 数据视图
+    raw_df = _load_raw_data(data_path)
+
+    # 目标列映射
+    target_col_map = {
+        "dayahead": "day_ahead_clearing_price",
+        "realtime": "real_time_clearing_price",
+    }
+    target_col = target_col_map.get(target)
+    if target_col is None:
+        logger.error("[timesfm] Unknown target: %s", target)
+        return None
+
+    # 将 cutoff 之后的目标值置为 NaN
+    if "ds" in raw_df.columns:
+        raw_df["ds"] = pd.to_datetime(raw_df["ds"])
+        cutoff_mask = raw_df["ds"] >= cutoff_dt
+        raw_df.loc[cutoff_mask, target_col] = None
+        logger.info(
+            "[timesfm] Masked %d rows after cutoff %s (col=%s)",
+            cutoff_mask.sum(),
+            cutoff_dt,
+            target_col,
+        )
+
+    # 写入临时文件
+    cutoff_data_path = Path(cache_dir) / f"cutoff_safe_{Path(data_path).name}"
+    cutoff_data_path.parent.mkdir(parents=True, exist_ok=True)
+    if str(data_path).endswith(".xlsx"):
+        raw_df.to_excel(str(cutoff_data_path), index=False)
+    else:
+        raw_df.to_csv(str(cutoff_data_path), index=False)
+
+    # 调用 TimesFM 推理
     from TimesFM.infer import predict_price_for_range
 
     try:
         result_df = predict_price_for_range(
-            data_path=data_path,
+            data_path=str(cutoff_data_path),
             start_date=start_date,
             end_date=end_date,
             target=target,
@@ -158,8 +210,34 @@ def _predict_oof_fold(
             result_df["source"] = "pretrained_inference"
             result_df["run_mode"] = "rolling_origin"
 
+            # 缓存结果
+            result_df.to_csv(cache_file, index=False)
+
+            # 保存 manifest
+            manifest = {
+                "cache_file": str(cache_file),
+                "cutoff_data_path": str(cutoff_data_path),
+                "cutoff_date": cutoff_date,
+                "start_date": start_date,
+                "end_date": end_date,
+                "target": target,
+                "generated_at": dt.now().isoformat(),
+                "rows_masked": int(cutoff_mask.sum()) if "cutoff_mask" in dir() else 0,
+            }
+            manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(manifest_file, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+
         return result_df
 
     except Exception as e:
         logger.error("[timesfm] prediction failed: %s", e, exc_info=True)
         return None
+
+
+def _load_raw_data(data_path: str) -> pd.DataFrame:
+    """加载原始数据。"""
+    path = str(data_path)
+    if path.endswith(".xlsx") or path.endswith(".xls"):
+        return pd.read_excel(path)
+    return pd.read_csv(path)

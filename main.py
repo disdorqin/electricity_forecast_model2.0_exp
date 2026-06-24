@@ -75,6 +75,10 @@ def main() -> int:
         result = run_full_pipeline(args)
         print(f"Full pipeline complete: {result['classifier_stage']}")
         return 0
+    if args.pipeline == "rolling_oof":
+        from rolling_oof.cli import run_rolling_oof
+        result = run_rolling_oof(args)
+        return 0
     return 0
 
 

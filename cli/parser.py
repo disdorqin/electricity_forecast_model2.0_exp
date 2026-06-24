@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
             "fuse_stage",
             "classifier_stage",
             "full",
+            "rolling_oof",
         ],
     )
     parser.add_argument("--target", default="both", choices=["dayahead", "realtime", "both"])
@@ -52,4 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clf-data", default=None)
     parser.add_argument("--daily-run-root", default="daily_runs")
     parser.add_argument("--validation-days", type=int, default=30, help="Number of days for the validation window (default: 30). Used by model_stage for weight fitting.")
+
+    # --- rolling-origin OOF 池参数 ---
+    rolling_group = parser.add_argument_group("Rolling OOF Pool Options")
+    rolling_group.add_argument("--oof-output-root", default="oof_runs", help="OOF output root directory")
+    rolling_group.add_argument("--oof-start-month", default=None, help="First target month, YYYY-MM")
+    rolling_group.add_argument("--oof-end-month", default=None, help="Last target month, YYYY-MM")
+    rolling_group.add_argument("--oof-expanding", action="store_true", default=True, help="Use expanding window (default)")
+    rolling_group.add_argument("--oof-train-min-months", type=int, default=6, help="Min training months for sliding window")
+    rolling_group.add_argument("--timemixer-rolling-mode", default="daily", choices=["window_once", "block", "daily"], help="TimeMixer rolling mode")
+    rolling_group.add_argument("--timemixer-block-days", type=int, default=7, help="TimeMixer block mode: days per block")
+    rolling_group.add_argument("--escort-date", default=None, help="Phase C escort prediction target date")
+    rolling_group.add_argument("--skip-oof-audit", action="store_true", help="Skip fold-level audit")
+
     return parser

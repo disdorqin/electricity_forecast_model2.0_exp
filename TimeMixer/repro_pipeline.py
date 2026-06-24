@@ -46,6 +46,7 @@ class RunConfig:
     train_months: int = 12
     val_ratio: float = 0.2
     training_mode: str = "rolling"
+    block_days: int = 7  # block walk-forward 模式下每 block 的天数
     frozen_train_start: str | None = None
     frozen_train_end_exclusive: str | None = None
     decomposition_mode: str = "none"
@@ -1890,6 +1891,13 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
     findings = audit_protocol(cfg, df)
 
     test_start, test_end = resolve_test_window(cfg)
+
+    # --- 新增：block / daily walk-forward 模式 ---
+    if cfg.training_mode == "daily":
+        return _run_daily_walk_forward(cfg, df, device, findings)
+    if cfg.training_mode == "block":
+        return _run_block_walk_forward(cfg, df, device, findings)
+
     if cfg.training_mode == "frozen":
         if not cfg.frozen_train_start or not cfg.frozen_train_end_exclusive:
             raise ValueError("training_mode='frozen' requires frozen_train_start and frozen_train_end_exclusive")
@@ -2568,6 +2576,250 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
     }
 
 
+# =========================================================================
+# Block / Daily Walk-Forward Training Modes
+# =========================================================================
+
+SEGMENT_DA_TARGETS: dict[str, str] = {
+    "1_8": "day_ahead_clearing_price",
+    "9_16": "day_ahead_clearing_price",
+    "17_24": "day_ahead_clearing_price",
+}
+SEGMENT_RT_TARGETS: dict[str, str] = {
+    "1_8": "real_time_clearing_price",
+    "9_16": "real_time_clearing_price",
+    "17_24": "real_time_clearing_price",
+}
+
+
+def _run_daily_walk_forward(
+    cfg: RunConfig, df: pd.DataFrame, device: torch.device, findings: Any
+) -> dict[str, Any]:
+    """Daily walk-forward: 每天训练一次，逐日预测。
+
+    训练窗口从 train_start 到 D-1 15:00，每天重新训练。
+    """
+    test_start, test_end = resolve_test_window(cfg)
+    test_days = date_range_days(test_start, test_end)
+    # 过滤不可用天
+    test_days = filter_available_days(
+        df, test_days, seq_len=cfg.seq_len,
+        cutoff_hour_da=cfg.cutoff_hour_da, cutoff_hour_rt=cfg.cutoff_hour_rt,
+        da_target_mode="direct", rt_target_mode="direct", inference_mode=True,
+    )
+
+    da_target_mode = resolve_task_target_mode(cfg, "da")
+    rt_target_mode = resolve_task_target_mode(cfg, "rt")
+
+    all_da_preds: list[pd.DataFrame] = []
+    all_rt_preds: list[pd.DataFrame] = []
+
+    for target_day in test_days:
+        target_day_dt = pd.Timestamp(target_day)
+        # 训练窗口截止到 D-1 15:00
+        cutoff = compute_cutoff(target_day_dt, cfg.cutoff_hour_da)
+        train_days = date_range_days(
+            max(df["ds"].min().normalize(), cutoff - pd.DateOffset(months=cfg.train_months)),
+            cutoff + pd.Timedelta(days=1),
+        )
+        if len(train_days) < 30:  # 最少30天训练
+            continue
+        train_days_w, valid_days_w = split_train_valid(train_days, cfg.val_ratio)
+        test_days_w = [target_day]
+
+        try:
+            day_da, day_rt = _train_predict_single_day(
+                cfg, df, device, train_days_w, valid_days_w, test_days_w,
+                da_target_mode, rt_target_mode,
+            )
+            if day_da is not None:
+                all_da_preds.append(day_da)
+            if day_rt is not None:
+                all_rt_preds.append(day_rt)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    return _build_result(all_da_preds, all_rt_preds, test_start, test_end, findings)
+
+
+def _run_block_walk_forward(
+    cfg: RunConfig, df: pd.DataFrame, device: torch.device, findings: Any
+) -> dict[str, Any]:
+    """Block walk-forward: 每 block_days 天训练一次，预测一个 block。"""
+    test_start, test_end = resolve_test_window(cfg)
+    test_days = date_range_days(test_start, test_end)
+    test_days = filter_available_days(
+        df, test_days, seq_len=cfg.seq_len,
+        cutoff_hour_da=cfg.cutoff_hour_da, cutoff_hour_rt=cfg.cutoff_hour_rt,
+        da_target_mode="direct", rt_target_mode="direct", inference_mode=True,
+    )
+
+    block_days = getattr(cfg, "block_days", 7)
+    da_target_mode = resolve_task_target_mode(cfg, "da")
+    rt_target_mode = resolve_task_target_mode(cfg, "rt")
+
+    all_da_preds: list[pd.DataFrame] = []
+    all_rt_preds: list[pd.DataFrame] = []
+
+    for i in range(0, len(test_days), block_days):
+        block = test_days[i:i + block_days]
+        block_start = pd.Timestamp(block[0])
+        # 训练窗口截止到 block 开始前一天的 15:00
+        cutoff = compute_cutoff(block_start, cfg.cutoff_hour_da)
+        train_days = date_range_days(
+            max(df["ds"].min().normalize(), cutoff - pd.DateOffset(months=cfg.train_months)),
+            cutoff + pd.Timedelta(days=1),
+        )
+        if len(train_days) < 30:
+            continue
+        train_days_w, valid_days_w = split_train_valid(train_days, cfg.val_ratio)
+
+        try:
+            day_da, day_rt = _train_predict_single_day(
+                cfg, df, device, train_days_w, valid_days_w, block,
+                da_target_mode, rt_target_mode,
+            )
+            if day_da is not None:
+                all_da_preds.append(day_da)
+            if day_rt is not None:
+                all_rt_preds.append(day_rt)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    return _build_result(all_da_preds, all_rt_preds, test_start, test_end, findings)
+
+
+def _train_predict_single_day(
+    cfg: RunConfig,
+    df: pd.DataFrame,
+    device: torch.device,
+    train_days: list,
+    valid_days: list,
+    test_days: list,
+    da_target_mode: str,
+    rt_target_mode: str,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """辅助函数：对给定的 train/valid/test 天数组训练并预测。
+
+    返回 (da_predictions, rt_predictions) 两个 DataFrame。
+    """
+    da_preds_list: list[pd.DataFrame] = []
+    rt_preds_list: list[pd.DataFrame] = []
+
+    # 训练 DA 三个段
+    for segment_name, start_idx, end_idx in SEGMENTS:
+        da_train_arrays = build_segment_arrays(
+            df, train_days, "day_ahead_clearing_price", cfg.seq_len,
+            cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
+        )
+        da_train_past, da_train_future, da_train_y, _ = da_train_arrays
+
+        da_bundle = train_model(
+            da_train_past, da_train_future, da_train_y, cfg, device,
+            task="da", segment_name=segment_name,
+        )
+
+        da_test_arrays = build_segment_arrays(
+            df, test_days, "day_ahead_clearing_price", cfg.seq_len,
+            cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
+        )
+        da_test_past, da_test_future, da_test_y, da_test_baseline = da_test_arrays
+
+        da_pred = predict_model(da_bundle, da_test_past, da_test_future)
+        da_pred_df = _predictions_to_dataframe(
+            da_pred, da_test_y, da_test_baseline, test_days,
+            start_idx, end_idx, "dayahead", segment_name,
+        )
+        da_preds_list.append(da_pred_df)
+
+    # 训练 RT 三个段
+    for segment_name, start_idx, end_idx in SEGMENTS:
+        rt_train_arrays = build_segment_arrays(
+            df, train_days, "real_time_clearing_price", cfg.seq_len,
+            cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
+        )
+        rt_train_past, rt_train_future, rt_train_y, _ = rt_train_arrays
+
+        rt_bundle = train_model(
+            rt_train_past, rt_train_future, rt_train_y, cfg, device,
+            task="rt", segment_name=segment_name,
+        )
+
+        rt_test_arrays = build_segment_arrays(
+            df, test_days, "real_time_clearing_price", cfg.seq_len,
+            cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
+        )
+        rt_test_past, rt_test_future, rt_test_y, rt_test_baseline = rt_test_arrays
+
+        rt_pred = predict_model(rt_bundle, rt_test_past, rt_test_future)
+        rt_pred_df = _predictions_to_dataframe(
+            rt_pred, rt_test_y, rt_test_baseline, test_days,
+            start_idx, end_idx, "realtime", segment_name,
+        )
+        rt_preds_list.append(rt_pred_df)
+
+    da_result = pd.concat(da_preds_list, axis=0) if da_preds_list else None
+    rt_result = pd.concat(rt_preds_list, axis=0) if rt_preds_list else None
+    return da_result, rt_result
+
+
+def _predictions_to_dataframe(
+    y_pred: np.ndarray,
+    y_true: np.ndarray,
+    y_baseline: np.ndarray,
+    test_days: list,
+    start_idx: int,
+    end_idx: int,
+    task: str,
+    segment_name: str,
+) -> pd.DataFrame:
+    """将模型预测数组转换为 DataFrame。"""
+    n_days = len(test_days)
+    rows: list[dict] = []
+    for day_i in range(n_days):
+        target_day = test_days[day_i]
+        hours = list(range(start_idx, end_idx + 1))
+        for j, hour in enumerate(hours):
+            pred_idx = day_i * len(hours) + j
+            rows.append({
+                "target_day": pd.Timestamp(target_day).strftime("%Y-%m-%d"),
+                "ds": pd.Timestamp(target_day) + pd.Timedelta(hours=hour + 1),
+                "hour_business": hour + 1,
+                "period": segment_name,
+                "task": task,
+                "y_pred": float(y_pred[pred_idx]) if pred_idx < len(y_pred) else None,
+                "y_true": float(y_true[pred_idx]) if pred_idx < len(y_true) else None,
+                "model_name": "timemixer",
+            })
+    return pd.DataFrame(rows)
+
+
+def _build_result(
+    da_preds: list[pd.DataFrame],
+    rt_preds: list[pd.DataFrame],
+    test_start: pd.Timestamp,
+    test_end: pd.Timestamp,
+    findings: Any,
+) -> dict[str, Any]:
+    """构建与 run_monthly_reproduction 兼容的返回格式。"""
+    da_df = pd.concat(da_preds, axis=0) if da_preds else pd.DataFrame()
+    rt_df = pd.concat(rt_preds, axis=0) if rt_preds else pd.DataFrame()
+
+    return {
+        "da_predictions": da_df,
+        "rt_predictions": rt_df,
+        "metrics": None,
+        "manifest": {
+            "test_start": test_start.isoformat(),
+            "test_end": test_end.isoformat(),
+            "da_rows": len(da_df),
+            "rt_rows": len(rt_df),
+        },
+    }
+
+
 def parse_args() -> RunConfig:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", default=r"D:\作业\大创_挑战杯_互联网\大学生创新创业计划\大创实现\其他资料\epf\data\shandong_pmos_hourly.csv")
@@ -2579,7 +2831,8 @@ def parse_args() -> RunConfig:
     parser.add_argument("--backbone", default="timemixer", choices=["timemixer", "timesnet"])
     parser.add_argument("--rt-916-backbone", choices=["timemixer", "timesnet"])
     parser.add_argument("--train-months", type=int, default=12)
-    parser.add_argument("--training-mode", default="rolling", choices=["rolling", "frozen"])
+    parser.add_argument("--training-mode", default="rolling", choices=["rolling", "frozen", "block", "daily"])
+    parser.add_argument("--block-days", type=int, default=7, help="Block mode: days per block")
     parser.add_argument("--frozen-train-start")
     parser.add_argument("--frozen-train-end-exclusive")
     parser.add_argument("--decomposition-mode", default="none", choices=["none", "vmd"])
@@ -2633,6 +2886,7 @@ def parse_args() -> RunConfig:
         rt_916_backbone=args.rt_916_backbone,
         train_months=args.train_months,
         training_mode=args.training_mode,
+        block_days=args.block_days,
         frozen_train_start=args.frozen_train_start,
         frozen_train_end_exclusive=args.frozen_train_end_exclusive,
         decomposition_mode=args.decomposition_mode,

@@ -407,6 +407,20 @@ def normalize_long_table(
     result["test_end"] = test_end
     result["created_at"] = datetime.now().isoformat()
 
+    # 自动计算 business_day / hour_business / period
+    if "ds" in result.columns:
+        ds_series = pd.to_datetime(result["ds"])
+        # hour_business: 00:00 -> 24, else actual hour
+        result["hour_business"] = ds_series.apply(
+            lambda t: 24 if t.hour == 0 else t.hour
+        ).astype(int)
+        # business_day: 00:00 归属前一天
+        result["business_day"] = ds_series.apply(
+            lambda t: (t - pd.Timedelta(days=1) if t.hour == 0 else t).strftime("%Y-%m-%d")
+        )
+        # period: 1_8 / 9_16 / 17_24
+        result["period"] = result["hour_business"].apply(assign_period)
+
     # 补充缺失列
     for col in LONG_TABLE_COLUMNS:
         if col not in result.columns:

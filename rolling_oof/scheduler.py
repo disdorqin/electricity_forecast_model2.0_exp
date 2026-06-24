@@ -188,6 +188,22 @@ class RollingOriginOrchestrator:
                 error_message=f"Unknown model: {model_name}",
             )
 
+        # 跳过模型不支持的 task（如 SGDFNet 只支持 realtime）
+        adapter_inst = adapter_cls()
+        if task not in adapter_inst.supported_tasks:
+            logger.info(
+                "[rolling-oof]   %s/%s: skipped (model only supports %s)",
+                model_name, task, adapter_inst.supported_tasks,
+            )
+            return FoldResult(
+                fold_id=fold.fold_id,
+                model_name=model_name,
+                task=task,
+                fold_spec=fold,
+                success=True,
+                error_message=f"Task {task} not supported by {model_name} (supports {adapter_inst.supported_tasks})",
+            )
+
         # 构造适配器的额外参数
         extra_kwargs = {
             "training_months": self.config.training_months,

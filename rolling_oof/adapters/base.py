@@ -34,6 +34,7 @@ class BaseRollingAdapter(abc.ABC):
 
     model_name: str = ""
     device_type: str = "cpu"
+    supported_tasks: tuple[str, ...] = ("dayahead", "realtime")
 
     @abc.abstractmethod
     def fold_train_predict(

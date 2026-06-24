@@ -107,80 +107,37 @@ def audit_single_fold(
 def audit_cross_model_alignment(
     all_predictions: dict[tuple[str, str], pd.DataFrame],
 ) -> list[AuditCheck]:
-    """审计多个模型之间的时间对齐。
-
-    Parameters
-    ----------
-    all_predictions : dict[(model_name, task), DataFrame]
-        各模型的预测结果。
-
-    Returns
-    -------
-    list[AuditCheck]
-    """
+    """审计多个模型之间的时间对齐（按 task 分组比较）。dayahead 和 realtime 分开。"""
     checks: list[AuditCheck] = []
 
-    # 收集所有模型的 target_day+ds 集合
-    keys_by_model: dict[str, set] = {}
+    # 按 task 分组
+    by_task: dict[str, list[tuple[str, pd.DataFrame]]] = {}
     for (model_name, task), df in all_predictions.items():
         if df is None or df.empty:
-            checks.append(
-                AuditCheck(
-                    name="cross_model_alignment",
-                    passed=False,
-                    severity="error",
-                    detail=f"{model_name}/{task}: empty predictions",
-                    model_name=model_name,
-                    task=task,
-                )
-            )
+            checks.append(AuditCheck(name="cross_model_alignment", passed=False, severity="error", detail=f"{model_name}/{task}: empty predictions", model_name=model_name, task=task))
             continue
-        keys = set(zip(df.get("target_day", []), df.get("ds", [])))
-        keys_by_model[f"{model_name}/{task}"] = keys
+        by_task.setdefault(task, []).append((model_name, df))
 
-    if len(keys_by_model) <= 1:
-        checks.append(
-            AuditCheck(
-                name="cross_model_alignment",
-                passed=True,
-                severity="info",
-                detail="Only one model present, no cross-alignment check needed",
-            )
-        )
-        return checks
-
-    # 计算交集
-    all_keys = list(keys_by_model.values())
-    intersection = all_keys[0].intersection(*all_keys[1:])
-
-    misaligned: list[str] = []
-    for label, keys in keys_by_model.items():
-        missing = intersection - keys
-        extra = keys - intersection
-        if missing or extra:
-            misaligned.append(
-                f"{label}: missing {len(missing)} points, extra {len(extra)} points"
-            )
-
-    if misaligned:
-        checks.append(
-            AuditCheck(
-                name="cross_model_alignment",
-                passed=False,
-                severity="error",
-                detail=f"Alignment issues: {'; '.join(misaligned)}",
-                evidence={"intersection_size": len(intersection)},
-            )
-        )
-    else:
-        checks.append(
-            AuditCheck(
-                name="cross_model_alignment",
-                passed=True,
-                severity="info",
-                detail=f"All models aligned on {len(intersection)} target_day+ds pairs",
-            )
-        )
+    for task, entries in by_task.items():
+        if len(entries) <= 1:
+            checks.append(AuditCheck(name=f"cross_model_alignment_{task}", passed=True, severity="info", detail=f"{task}: only one model", task=task))
+            continue
+        keys_by_model: dict[str, set] = {}
+        for model_name, df in entries:
+            keys = set(zip(df.get("target_day", []), df.get("ds", [])))
+            keys_by_model[model_name] = keys
+        all_keys_list = list(keys_by_model.values())
+        intersection = all_keys_list[0].intersection(*all_keys_list[1:])
+        misaligned = []
+        for label, keys in keys_by_model.items():
+            missing = intersection - keys
+            extra = keys - intersection
+            if missing or extra:
+                misaligned.append(f"{label}: missing {len(missing)}, extra {len(extra)}")
+        if misaligned:
+            checks.append(AuditCheck(name=f"cross_model_alignment_{task}", passed=False, severity="error", detail=f"{task}: alignment issues - {'; '.join(misaligned)}", task=task, evidence={"intersection_size": len(intersection)}))
+        else:
+            checks.append(AuditCheck(name=f"cross_model_alignment_{task}", passed=True, severity="info", detail=f"{task}: {len(entries)} models aligned on {len(intersection)} points", task=task))
 
     return checks
 

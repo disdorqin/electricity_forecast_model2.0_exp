@@ -157,14 +157,22 @@ def _predict_oof_fold(
     # 构造 cutoff-safe 数据视图
     raw_df = _load_raw_data(data_path)
 
-    # 目标列映射
-    target_col_map = {
-        "dayahead": "day_ahead_clearing_price",
-        "realtime": "real_time_clearing_price",
+    # 目标列 candidates 查找（兼容多种命名）
+    target_col_candidates = {
+        "dayahead": ["day_ahead_clearing_price", "日前电价", "日前出清价"],
+        "realtime": ["realtime_price", "real_time_clearing_price", "实时电价"],
     }
-    target_col = target_col_map.get(target)
+    candidates = target_col_candidates.get(target, [])
+    target_col = None
+    for cand in candidates:
+        if cand in raw_df.columns:
+            target_col = cand
+            break
     if target_col is None:
-        logger.error("[timesfm] Unknown target: %s", target)
+        logger.error(
+            "[timesfm] Cannot find target column for %s. Candidates: %s. Columns: %s",
+            target, candidates, list(raw_df.columns)[:20],
+        )
         return None
 
     # 将 cutoff 之后的目标值置为 NaN

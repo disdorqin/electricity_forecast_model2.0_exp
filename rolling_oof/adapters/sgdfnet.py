@@ -30,6 +30,7 @@ class SGDFNetRollingAdapter(BaseRollingAdapter):
 
     model_name: str = "sgdfnet"
     device_type: str = "cpu"
+    supported_tasks: tuple[str, ...] = ("realtime",)
 
     def fold_train_predict(
         self,

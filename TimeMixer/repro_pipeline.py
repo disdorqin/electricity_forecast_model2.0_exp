@@ -76,6 +76,10 @@ class RunConfig:
     rt_risk_profile: str = "baseline"
     rt_peak_weight_multiplier: float = 1.4
     rt_normal_focus_multiplier: float = 1.2
+    rt_916_loss_weight: float = 1.0
+    rt_916_spike_penalty: float = 0.0
+    rt_916_spike_threshold: float = 350.0
+    da_916_loss_weight: float = 1.0
     calibration_shrink: float = 0.5
     affine_clip_min: float = 0.7
     affine_clip_max: float = 1.3
@@ -1440,6 +1444,22 @@ def train_model(
             if da_hour_weight is not None:
                 asym_weight = asym_weight * da_hour_weight.reshape(1, -1)
             return (per_step * asym_weight).mean()
+        # === v15 时段感知 loss 加权：DA 9-16 与 RT 9-16 单独加权 ===
+        if task == "rt" and cfg.rt_916_loss_weight > 1.0 and pred.shape[1] >= 16:
+            per_step = torch.nn.functional.huber_loss(pred, target, reduction="none", delta=50.0)
+            hour_mask = torch.ones(pred.shape[1], device=pred.device)
+            hour_mask[8:16] = float(cfg.rt_916_loss_weight)
+            per_step = per_step * hour_mask.reshape(1, -1)
+            if cfg.rt_916_spike_penalty > 0.0:
+                spike_over = torch.relu(target.abs() - cfg.rt_916_spike_threshold)
+                per_step = per_step + cfg.rt_916_spike_penalty * (pred.abs() - target.abs()).abs() * (spike_over > 0).float()
+            return per_step.mean()
+        if task == "da" and cfg.da_916_loss_weight > 1.0 and pred.shape[1] >= 16:
+            per_step = torch.nn.functional.huber_loss(pred, target, reduction="none", delta=50.0)
+            hour_mask = torch.ones(pred.shape[1], device=pred.device)
+            hour_mask[8:16] = float(cfg.da_916_loss_weight)
+            per_step = per_step * hour_mask.reshape(1, -1)
+            return per_step.mean()
         return torch.nn.functional.huber_loss(pred, target, reduction="mean", delta=50.0)
 
     # === AMP 混合精度(依据 docs/项目提高速度.md)===
@@ -2315,6 +2335,10 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         "scales": cfg.scales,
         "dropout": cfg.dropout,
         "rt_segment_head_mode": cfg.rt_segment_head_mode,
+        "rt_916_loss_weight": cfg.rt_916_loss_weight,
+        "rt_916_spike_penalty": cfg.rt_916_spike_penalty,
+        "rt_916_spike_threshold": cfg.rt_916_spike_threshold,
+        "da_916_loss_weight": cfg.da_916_loss_weight,
         "lr": cfg.lr,
         "weight_decay": cfg.weight_decay,
         "patience": cfg.patience,

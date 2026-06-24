@@ -1,4 +1,4 @@
-﻿from chinese_calendar import is_workday, is_holiday
+﻿﻿﻿﻿from chinese_calendar import is_workday, is_holiday
 from borax.calendars import LunarDate
 import pandas as pd
 import datetime
@@ -283,5 +283,112 @@ def enrich_period_local_features(df, target_col="实时电价", pred_len=8):
         "period_mix_anchor",
     ]:
         out[col] = pd.to_numeric(out[col], errors="coerce").ffill().fillna(0.0)
+    return out
+
+
+# ==============================================================
+#  DA→RT 联动特征注入
+#  - 在 RT 训练/推理时,把"日前电价"作为代理"DA 模型输出"注入
+#  - da_pred_today    : DA 模型对"今天"当前小时的预测 (=t 时刻的日前电价)
+#  - da_pred_tomorrow : DA 模型对"明天"同一时刻的预测 (=t+24h 的日前电价)
+#  - da_error_24h     : 过去 24h DA 实际(代理为预测)的平均绝对误差(滚动波动代理)
+#  - da_ramp_seq_24h  : 过去 24h DA 的 ramp 序列特征
+#  - da_pred_48h_lag  : 48h 前的 DA(给 1-8 点用的"昨天全天 DA"信号)
+#  - da_pred_24h_lag  : 24h 前的 DA(给 9-16 点用的"今天 0-8 点 DA 实际"信号)
+# ==============================================================
+def enrich_da_linkage_features(
+    df,
+    da_pred_series=None,
+    target_col="实时电价",
+    da_col="日前电价",
+    error_window=24,
+):
+    """
+    在已包含 (时刻, 日前电价, ...) 的 df 上追加 6 个 DA 联动特征列.
+    - da_pred_series: 可选,Series indexed by 时刻,作为"DA 模型预测"覆盖.
+      若为 None,则把 df[da_col] 视作完美预测(训练/回测用).
+    """
+    out = df.copy()
+    out["时刻"] = pd.to_datetime(out["时刻"])
+    out = out.sort_values("时刻").reset_index(drop=True)
+
+    if da_pred_series is not None:
+        da_pred = pd.Series(da_pred_series).copy()
+        da_pred.index = pd.to_datetime(da_pred.index)
+        out = out.merge(
+            da_pred.rename("da_model_pred").reset_index().rename(columns={"index": "时刻"}),
+            on="时刻",
+            how="left",
+        )
+        # 若某时刻缺预测,回退到日前电价(实际)
+        out["da_model_pred"] = out["da_model_pred"].fillna(out[da_col])
+    else:
+        # 训练/回测代理:把"日前电价"本身视作"DA 模型输出"
+        out["da_model_pred"] = pd.to_numeric(out[da_col], errors="coerce")
+
+    # da_pred_today    : t 时刻的 DA 模型预测
+    out["da_pred_today"] = pd.to_numeric(out["da_model_pred"], errors="coerce")
+    # da_pred_tomorrow : t+24h 时刻的 DA 模型预测(向前看 24h)
+    out["da_pred_tomorrow"] = out["da_pred_today"].shift(-24)
+    # 24h 滞后:在 1-8 点场景时,看到的是"昨天全天 DA"
+    out["da_pred_24h_lag"] = out["da_pred_today"].shift(24)
+    out["da_pred_48h_lag"] = out["da_pred_today"].shift(48)
+    # da_error_24h : 过去 24h DA ramp 的滚动平均绝对值(代理 DA 模型的 MAE 估计)
+    da_diff = out["da_pred_today"].diff().abs()
+    out["da_error_24h"] = da_diff.rolling(error_window, min_periods=1).mean()
+    # da_ramp_seq_24h : DA 24h ramp 序列(取首/中/末三个位置作为紧凑表示)
+    out["da_ramp_first_8"] = (
+        out["da_pred_today"].rolling(8, min_periods=1).mean()
+        - out["da_pred_today"].shift(8).rolling(8, min_periods=1).mean()
+    )
+    out["da_ramp_mid_8"] = (
+        out["da_pred_today"].rolling(8, min_periods=1).mean()
+        - out["da_pred_today"].shift(8)
+    )
+    out["da_ramp_pred_to_actual"] = out["da_pred_today"] - out["da_pred_24h_lag"]
+
+    fill_cols = [
+        "da_pred_today",
+        "da_pred_tomorrow",
+        "da_pred_24h_lag",
+        "da_pred_48h_lag",
+        "da_error_24h",
+        "da_ramp_first_8",
+        "da_ramp_mid_8",
+        "da_ramp_pred_to_actual",
+    ]
+    for c in fill_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce").ffill().bfill().fillna(0.0)
+
+    return out
+
+
+def inject_external_da_predictions(df, external_da_df, da_col="日前电价", time_col="时刻"):
+    """
+    把外部 DA 模型(DataFrame 列:[时刻, 预测日前电价] 或 [时刻, da_pred])
+    注入到 df 的"日前电价"列上(只覆盖原值,缺失部分保持原值).
+    返回新 DataFrame(不修改原对象).
+    """
+    if external_da_df is None or len(external_da_df) == 0:
+        return df
+    out = df.copy()
+    out[time_col] = pd.to_datetime(out[time_col])
+    ext = external_da_df.copy()
+    ext[time_col] = pd.to_datetime(ext[time_col])
+    if "预测日前电价" in ext.columns:
+        ext = ext.rename(columns={"预测日前电价": "_da_pred"})
+    elif "da_pred" in ext.columns:
+        ext = ext.rename(columns={"da_pred": "_da_pred"})
+    elif da_col in ext.columns:
+        ext = ext.rename(columns={da_col: "_da_pred"})
+    else:
+        return df
+    ext = ext[[time_col, "_da_pred"]].drop_duplicates(subset=[time_col], keep="last")
+    out = out.merge(ext, on=time_col, how="left")
+    if da_col in out.columns:
+        out[da_col] = out["_da_pred"].where(out["_da_pred"].notna(), out[da_col])
+    else:
+        out[da_col] = out["_da_pred"]
+    out = out.drop(columns=["_da_pred"])
     return out
 

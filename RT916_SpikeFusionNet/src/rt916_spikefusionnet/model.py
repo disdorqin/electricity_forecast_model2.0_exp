@@ -1,7 +1,27 @@
-﻿import math
+﻿﻿﻿﻿import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# ====================================================================
+#  W4: SMAPE-floor50 loss
+#  - 业务目标函数,直接优化 SMAPE;floor=50 防止 |y|<50 的小值爆炸
+#  - SMAPE(y, ŷ) = 2*|y-ŷ| / (|y|+|ŷ|+eps)
+#  - floor(y) = max(|y|, 50) 对 y/ŷ 都做 floor,保持和业务 evaluate 一致
+# ====================================================================
+class SMAPEFloor50Loss(nn.Module):
+    def __init__(self, floor_value: float = 50.0, eps: float = 1e-3):
+        super().__init__()
+        self.floor_value = float(floor_value)
+        self.eps = float(eps)
+
+    def forward(self, pred, target):
+        # 与 calc_smape 评估函数保持一致: y = max(y_true, floor), yp = max(y_pred, floor)
+        y = torch.where(target < self.floor_value, torch.full_like(target, self.floor_value), target)
+        yp = torch.where(pred < self.floor_value, torch.full_like(pred, self.floor_value), pred)
+        denom = (y.abs() + yp.abs()) / 2.0 + self.eps
+        return (2.0 * (y - yp).abs() / denom).mean()
 
 
 def FFT_for_Period(x, k=3):

@@ -52,3 +52,12 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# WorkBuddy local files
+.codebuddy/
+.workbuddy/
+
+# Weird temp files with special characters
+ion.dynamic_weights*
+_*.py
+test_*.py

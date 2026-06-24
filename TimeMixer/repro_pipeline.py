@@ -80,6 +80,12 @@ class RunConfig:
     rt_916_spike_penalty: float = 0.0
     rt_916_spike_threshold: float = 350.0
     da_916_loss_weight: float = 1.0
+    # === v21: 9-16 分段头 + boost loss + 注意力偏置 ===
+    rt_916_segment_head_enabled: bool = False
+    rt_916_attn_mask_916: bool = False
+    rt_916_boost_weight: float = 0.5
+    rt_916_boost_decay: float = 0.5
+    rt_916_boost_warmup_epochs: int = 2
     calibration_shrink: float = 0.5
     affine_clip_min: float = 0.7
     affine_clip_max: float = 1.3
@@ -94,16 +100,27 @@ class RunConfig:
 
 
 class ElectricityDailyDataset(Dataset):
-    def __init__(self, past_arr: np.ndarray, future_arr: np.ndarray, y_arr: np.ndarray):
+    def __init__(
+        self,
+        past_arr: np.ndarray,
+        future_arr: np.ndarray,
+        y_arr: np.ndarray,
+        hour_ids_arr: np.ndarray | None = None,
+    ):
         self.past = torch.tensor(past_arr, dtype=torch.float32)
         self.future = torch.tensor(future_arr, dtype=torch.float32)
         self.y = torch.tensor(y_arr, dtype=torch.float32)
+        if hour_ids_arr is None:
+            # 默认全部置 0 (24 小时之外的占位)
+            self.hour_ids = torch.zeros(len(self.y), self.past.shape[1], dtype=torch.long)
+        else:
+            self.hour_ids = torch.tensor(hour_ids_arr, dtype=torch.long)
 
     def __len__(self) -> int:
         return len(self.y)
 
     def __getitem__(self, idx: int):
-        return self.past[idx], self.future[idx], self.y[idx]
+        return self.past[idx], self.future[idx], self.y[idx], self.hour_ids[idx]
 
 
 SEGMENTS: list[tuple[str, int, int]] = [
@@ -278,6 +295,7 @@ def make_past_features(
     cutoff: pd.Timestamp,
     target_col: str,
     seq_len: int,
+    return_hour_ids: bool = False,
 ) -> np.ndarray:
     idx = df.set_index("ds")
     hist = idx.loc[idx.index <= cutoff].tail(seq_len).copy()
@@ -326,6 +344,11 @@ def make_past_features(
             np.cos(2 * np.pi * hours / 24),
         ]
     ).T
+    if return_hour_ids:
+        # 物理小时 0..23 (与 business_hour 不同, business_hour 把 0 映射为 24)
+        # 这里用物理小时, 9-16 区间是 9,10,11,12,13,14,15,16
+        hour_ids = np.array([int(pd.Timestamp(x).hour) for x in hist.index], dtype=np.int64)
+        return features, hour_ids
     return features
 
 
@@ -391,15 +414,20 @@ def make_sample(
     da_values: np.ndarray | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return_hour_ids: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     cutoff = compute_cutoff(target_day, cutoff_hour)
-    past = make_past_features(df, cutoff, target_col, seq_len)
+    past, hour_ids = make_past_features(
+        df, cutoff, target_col, seq_len, return_hour_ids=True
+    )
     baseline = compute_blend_baseline(df, target_day, target_col)
     future = make_future_features(df, target_day, da_values=da_values, baseline_values=baseline)
     if inference_mode:
         # 预测/推断时目标日真实标签可能尚未产生（如实时电价），构造占位 y 即可。
         # 上游调用者（test 阶段）通常丢弃该返回值，因此不影响预测结果。
         y_model = np.zeros(24, dtype=float)
+        if return_hour_ids:
+            return past, future, y_model, baseline, hour_ids
         return past, future, y_model, baseline
     cur = df[(df["ds"] >= target_day) & (df["ds"] < target_day + pd.Timedelta(days=1))]
     y = cur[target_col].to_numpy(float)
@@ -409,6 +437,8 @@ def make_sample(
         y_model = y - baseline
     else:
         y_model = y
+    if return_hour_ids:
+        return past, future, y_model, baseline, hour_ids
     return past, future, y_model, baseline
 
 
@@ -430,11 +460,13 @@ def build_arrays(
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return_hour_ids: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
     y_list = []
     baseline_list = []
+    hour_ids_list = []
     for day in days:
         try:
             da_vals = None
@@ -449,7 +481,7 @@ def build_arrays(
                         cur["day_ahead_clearing_price"].to_numpy(float),
                         da_vals,
                     )
-            past, future, y, baseline = make_sample(
+            sample = make_sample(
                 df,
                 day,
                 target_col=target_col,
@@ -458,7 +490,13 @@ def build_arrays(
                 da_values=da_vals,
                 target_mode=target_mode,
                 inference_mode=inference_mode,
+                return_hour_ids=return_hour_ids,
             )
+            if return_hour_ids:
+                past, future, y, baseline, hour_ids = sample
+                hour_ids_list.append(hour_ids)
+            else:
+                past, future, y, baseline = sample
             past_list.append(past)
             future_list.append(future)
             y_list.append(y)
@@ -467,6 +505,14 @@ def build_arrays(
             continue
     if not past_list:
         raise ValueError("没有可用样本")
+    if return_hour_ids:
+        return (
+            np.stack(past_list),
+            np.stack(future_list),
+            np.stack(y_list),
+            np.stack(baseline_list),
+            np.stack(hour_ids_list),
+        )
     return (
         np.stack(past_list),
         np.stack(future_list),
@@ -486,11 +532,13 @@ def build_segment_arrays(
     pred_da_map: dict[pd.Timestamp, float] | None = None,
     target_mode: str = "residual_blend",
     inference_mode: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return_hour_ids: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     past_list = []
     future_list = []
     y_list = []
     baseline_list = []
+    hour_ids_list = []
     for day in days:
         try:
             da_vals = None
@@ -505,7 +553,7 @@ def build_segment_arrays(
                         cur["day_ahead_clearing_price"].to_numpy(float),
                         da_vals,
                     )
-            past, future, y, baseline = make_sample(
+            sample = make_sample(
                 df,
                 day,
                 target_col=target_col,
@@ -514,7 +562,13 @@ def build_segment_arrays(
                 da_values=da_vals,
                 target_mode=target_mode,
                 inference_mode=inference_mode,
+                return_hour_ids=return_hour_ids,
             )
+            if return_hour_ids:
+                past, future, y, baseline, hour_ids = sample
+                hour_ids_list.append(hour_ids)
+            else:
+                past, future, y, baseline = sample
             future_seg, y_seg = slice_segment(future, y, segment_start, segment_end)
             baseline_seg = baseline[segment_start:segment_end]
             past_list.append(past)
@@ -525,6 +579,14 @@ def build_segment_arrays(
             continue
     if not past_list:
         raise ValueError("没有可用样本")
+    if return_hour_ids:
+        return (
+            np.stack(past_list),
+            np.stack(future_list),
+            np.stack(y_list),
+            np.stack(baseline_list),
+            np.stack(hour_ids_list),
+        )
     return (
         np.stack(past_list),
         np.stack(future_list),
@@ -1288,6 +1350,7 @@ def train_model(
     device: torch.device,
     task: str,
     segment_name: str | None = None,
+    hour_ids: np.ndarray | None = None,
 ) -> dict[str, Any]:
     n = len(y)
     split = max(1, int(n * (1 - cfg.val_ratio)))
@@ -1307,15 +1370,20 @@ def train_model(
     def transform_y(a: np.ndarray) -> np.ndarray:
         return y_scaler.transform(a)
 
+    train_hour_ids = hour_ids[train_idx] if hour_ids is not None else None
+    valid_hour_ids = hour_ids[valid_idx] if hour_ids is not None else None
+
     train_ds = ElectricityDailyDataset(
         transform_past(past[train_idx]),
         transform_future(future[train_idx]),
         transform_y(y[train_idx]),
+        hour_ids_arr=train_hour_ids,
     )
     valid_ds = ElectricityDailyDataset(
         transform_past(past[valid_idx]),
         transform_future(future[valid_idx]),
         transform_y(y[valid_idx]),
+        hour_ids_arr=valid_hour_ids,
     )
     train_shuffle = True
     if task == "rt" and cfg.rt_loss_mode == "risk_peak_weighted":
@@ -1335,10 +1403,14 @@ def train_model(
 
     segment_head_mode = "none"
     backbone_name = cfg.backbone
-    if task == "rt" and segment_name == "9_16":
+    use_916_segment_head = False
+    if task == "rt" and segment_name == "9_16" and cfg.rt_916_segment_head_enabled:
+        segment_head_mode = "rt_916_segment_head"
+        use_916_segment_head = True
+    elif task == "rt" and segment_name == "9_16":
         segment_head_mode = cfg.rt_segment_head_mode
-        if cfg.rt_916_backbone:
-            backbone_name = cfg.rt_916_backbone
+    if task == "rt" and cfg.rt_916_backbone:
+        backbone_name = cfg.rt_916_backbone
     model = build_backbone(
         backbone_name,
         past_dim=past.shape[-1],
@@ -1349,6 +1421,7 @@ def train_model(
         scales=cfg.scales,
         dropout=cfg.dropout,
         segment_head_mode=segment_head_mode,
+        attn_mask_916=cfg.rt_916_attn_mask_916,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=cfg.lr * 0.01)
@@ -1462,6 +1535,10 @@ def train_model(
             return per_step.mean()
         return torch.nn.functional.huber_loss(pred, target, reduction="mean", delta=50.0)
 
+    # === v21 9-16 boost loss 初始化: 当 segment head 启用时, 残差目标在每个 batch 重新计算 ===
+    # 注意: 真实的目标残差 target_residual 在 forward 之后由 base_pred 得出, 这里仅做标志位
+    use_boost_loss = use_916_segment_head
+
     # === AMP 混合精度(依据 docs/项目提高速度.md)===
     _use_amp = _use_cuda and _os.getenv("OPTIM_AMP", "1") == "1"
     _amp_dtype = torch.bfloat16 if _os.getenv("OPTIM_AMP_DTYPE", "bf16").lower() == "bf16" else torch.float16
@@ -1469,12 +1546,22 @@ def train_model(
     _non_blocking = _use_cuda and _os.getenv("OPTIM_NON_BLOCKING", "1") == "1"
 
     for epoch in range(1, cfg.epochs + 1):
+        # === v21 boost_weight 衰减 ===
+        if cfg.epochs > cfg.rt_916_boost_warmup_epochs:
+            decay_step = max(0, epoch - cfg.rt_916_boost_warmup_epochs)
+            current_boost_weight = cfg.rt_916_boost_weight * (
+                cfg.rt_916_boost_decay ** decay_step
+            )
+        else:
+            current_boost_weight = 0.0
         model.train()
         train_loss = 0.0
-        for batch_i, (xb, fb, yb) in enumerate(train_loader):
+        for batch_i, batch in enumerate(train_loader):
+            xb, fb, yb, hb = batch
             xb = xb.to(device, non_blocking=_non_blocking)
             fb = fb.to(device, non_blocking=_non_blocking)
             yb = yb.to(device, non_blocking=_non_blocking)
+            hb = hb.to(device, non_blocking=_non_blocking) if cfg.rt_916_attn_mask_916 else None
             optimizer.zero_grad(set_to_none=True)
             batch_peak = None
             batch_normal_focus = None
@@ -1487,8 +1574,25 @@ def train_model(
                 end = start + len(yb)
                 batch_normal_focus = normal_focus_weight_train[start:end]
             with torch.autocast(device_type="cuda", dtype=_amp_dtype, enabled=_use_amp):
-                pred = model(xb, fb)
+                # v21: 当 segment head 启用时, 返回 (boosted, base, residual)
+                if use_916_segment_head:
+                    pred, base_pred, seg_residual = model(xb, fb, past_hour_ids=hb, return_base=True)
+                elif cfg.rt_916_attn_mask_916:
+                    pred = model(xb, fb, past_hour_ids=hb)
+                else:
+                    pred = model(xb, fb)
                 loss = loss_fn(pred, yb, batch_peak, batch_normal_focus)
+                # v21 9-16 boost loss: 残差修正 vs 真实残差
+                if (
+                    use_916_segment_head
+                    and current_boost_weight > 0.0
+                    and pred.shape[1] >= 16
+                ):
+                    target_residual = yb[:, 8:16] - base_pred[:, 8:16]
+                    boost_loss = torch.nn.functional.mse_loss(
+                        seg_residual, target_residual
+                    )
+                    loss = loss + current_boost_weight * boost_loss
             if _scaler is not None:
                 _scaler.scale(loss).backward()
                 _scaler.unscale_(optimizer)
@@ -1505,10 +1609,12 @@ def train_model(
         model.eval()
         valid_loss = 0.0
         with torch.no_grad():
-            for batch_i, (xb, fb, yb) in enumerate(valid_loader):
+            for batch_i, batch in enumerate(valid_loader):
+                xb, fb, yb, hb = batch
                 xb = xb.to(device, non_blocking=_non_blocking)
                 fb = fb.to(device, non_blocking=_non_blocking)
                 yb = yb.to(device, non_blocking=_non_blocking)
+                hb = hb.to(device, non_blocking=_non_blocking) if cfg.rt_916_attn_mask_916 else None
                 batch_peak = None
                 batch_normal_focus = None
                 if peak_weight_valid is not None:
@@ -1520,7 +1626,10 @@ def train_model(
                     end = start + len(yb)
                     batch_normal_focus = normal_focus_weight_valid[start:end]
                 with torch.autocast(device_type="cuda", dtype=_amp_dtype, enabled=_use_amp):
-                    pred = model(xb, fb)
+                    if cfg.rt_916_attn_mask_916:
+                        pred = model(xb, fb, past_hour_ids=hb)
+                    else:
+                        pred = model(xb, fb)
                     v_loss = loss_fn(pred, yb, batch_peak, batch_normal_focus)
                 valid_loss += v_loss.item() * len(yb)
         valid_loss /= len(valid_ds)
@@ -1560,6 +1669,7 @@ def predict_model(
     future: np.ndarray,
     device: torch.device,
     batch_size: int,
+    hour_ids: np.ndarray | None = None,
 ) -> np.ndarray:
     ps = bundle["past_scaler"]
     fs = bundle["future_scaler"]
@@ -1567,13 +1677,25 @@ def predict_model(
     model = bundle["model"]
     past_t = ps.transform(past.reshape(-1, past.shape[-1])).reshape(past.shape)
     future_t = fs.transform(future.reshape(-1, future.shape[-1])).reshape(future.shape)
-    ds = ElectricityDailyDataset(past_t, future_t, np.zeros((len(past), 24), dtype=np.float32))
+    ds = ElectricityDailyDataset(
+        past_t,
+        future_t,
+        np.zeros((len(past), 24), dtype=np.float32),
+        hour_ids_arr=hour_ids,
+    )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     preds = []
+    use_hour_ids = hour_ids is not None
     model.eval()
     with torch.no_grad():
-        for xb, fb, _ in loader:
-            pred = model(xb.to(device), fb.to(device)).cpu().numpy()
+        for batch in loader:
+            if use_hour_ids:
+                xb, fb, _, hb = batch
+                hb = hb.to(device)
+            else:
+                xb, fb, _, _ = batch
+                hb = None
+            pred = model(xb.to(device), fb.to(device), past_hour_ids=hb).cpu().numpy()
             preds.append(pred)
     return ys.inverse_transform(np.vstack(preds))
 
@@ -1799,7 +1921,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         da_segment_preds = {}
         da_segment_bias = {}
         for segment_name, start_idx, end_idx in SEGMENTS:
-            da_train_past, da_train_future, da_train_y, _ = build_segment_arrays(
+            da_train_arrays = build_segment_arrays(
                 df,
                 train_days,
                 "day_ahead_clearing_price",
@@ -1808,9 +1930,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 target_mode=da_target_mode,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                da_train_past, da_train_future, da_train_y, _, _ = da_train_arrays
+            else:
+                da_train_past, da_train_future, da_train_y, _ = da_train_arrays
             da_bundle = train_model(da_train_past, da_train_future, da_train_y, cfg, device, task="da", segment_name=segment_name)
-            da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = build_segment_arrays(
+            da_valid_arrays = build_segment_arrays(
                 df,
                 valid_days,
                 "day_ahead_clearing_price",
@@ -1819,13 +1946,20 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 start_idx,
                 end_idx,
                 target_mode=da_target_mode,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                da_valid_past, da_valid_future, da_valid_y, da_valid_baseline, da_valid_hour_ids = da_valid_arrays
+            else:
+                da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = da_valid_arrays
+                da_valid_hour_ids = None
             da_valid_pred_model = predict_model(
                 da_bundle,
                 da_valid_past,
                 da_valid_future,
                 device,
                 cfg.batch_size,
+                hour_ids=da_valid_hour_ids,
             )
             da_valid_pred = restore_target_from_mode(
                 da_valid_pred_model,
@@ -1844,7 +1978,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 cfg.calibration_shrink,
             )
 
-            da_test_past, da_test_future, _, da_test_baseline = build_segment_arrays(
+            da_test_arrays = build_segment_arrays(
                 df,
                 test_days,
                 "day_ahead_clearing_price",
@@ -1854,13 +1988,20 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 end_idx,
                 target_mode=da_target_mode,
                 inference_mode=True,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                da_test_past, da_test_future, _, da_test_baseline, da_test_hour_ids = da_test_arrays
+            else:
+                da_test_past, da_test_future, _, da_test_baseline = da_test_arrays
+                da_test_hour_ids = None
             da_pred_model = predict_model(
                 da_bundle,
                 da_test_past,
                 da_test_future,
                 device,
                 cfg.batch_size,
+                hour_ids=da_test_hour_ids,
             )
             da_segment_preds[segment_name] = restore_target_from_mode(
                 da_pred_model,
@@ -1885,24 +2026,35 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         }
     else:
         da_target_mode = resolve_task_target_mode(cfg, "da")
-        da_train_past, da_train_future, da_train_y, _ = build_arrays(
+        da_train_arrays = build_arrays(
             df,
             train_days,
             "day_ahead_clearing_price",
             cfg.seq_len,
             cfg.cutoff_hour_da,
             target_mode=da_target_mode,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
+        if cfg.rt_916_attn_mask_916:
+            da_train_past, da_train_future, da_train_y, _, _ = da_train_arrays
+        else:
+            da_train_past, da_train_future, da_train_y, _ = da_train_arrays
         da_bundle = train_model(da_train_past, da_train_future, da_train_y, cfg, device, task="da")
-        da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = build_arrays(
+        da_valid_arrays = build_arrays(
             df,
             valid_days,
             "day_ahead_clearing_price",
             cfg.seq_len,
             cfg.cutoff_hour_da,
             target_mode=da_target_mode,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
-        da_valid_pred_model = predict_model(da_bundle, da_valid_past, da_valid_future, device, cfg.batch_size)
+        if cfg.rt_916_attn_mask_916:
+            da_valid_past, da_valid_future, da_valid_y, da_valid_baseline, da_valid_hour_ids = da_valid_arrays
+        else:
+            da_valid_past, da_valid_future, da_valid_y, da_valid_baseline = da_valid_arrays
+            da_valid_hour_ids = None
+        da_valid_pred_model = predict_model(da_bundle, da_valid_past, da_valid_future, device, cfg.batch_size, hour_ids=da_valid_hour_ids)
         da_valid_pred = restore_target_from_mode(da_valid_pred_model, da_valid_baseline, da_target_mode)
         da_valid_true = restore_target_from_mode(da_valid_y, da_valid_baseline, da_target_mode)
         da_bias = fit_segment_bias_calibrator(
@@ -1912,7 +2064,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.calibration_shrink,
         )
 
-        da_test_past, da_test_future, _, da_test_baseline = build_arrays(
+        da_test_arrays = build_arrays(
             df,
             test_days,
             "day_ahead_clearing_price",
@@ -1920,8 +2072,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.cutoff_hour_da,
             target_mode=da_target_mode,
             inference_mode=True,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
-        da_pred_model = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size)
+        if cfg.rt_916_attn_mask_916:
+            da_test_past, da_test_future, _, da_test_baseline, da_test_hour_ids = da_test_arrays
+        else:
+            da_test_past, da_test_future, _, da_test_baseline = da_test_arrays
+            da_test_hour_ids = None
+        da_pred_model = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size, hour_ids=da_test_hour_ids)
         da_preds = restore_target_from_mode(da_pred_model, da_test_baseline, da_target_mode)
         da_preds = apply_bias_calibrator(da_preds, da_bias)
         da_pred_df = make_prediction_rows(df, test_days, da_preds, "da", cfg.cutoff_hour_da)
@@ -1933,7 +2091,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         rt_segment_bias = {}
         rt_segment_affine = {}
         for segment_name, start_idx, end_idx in SEGMENTS:
-            rt_train_past, rt_train_future, rt_train_y, _ = build_segment_arrays(
+            rt_train_arrays = build_segment_arrays(
                 df,
                 train_days,
                 "realtime_price",
@@ -1943,9 +2101,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 end_idx,
                 pred_da_map=None,
                 target_mode=rt_target_mode,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                rt_train_past, rt_train_future, rt_train_y, _, _ = rt_train_arrays
+            else:
+                rt_train_past, rt_train_future, rt_train_y, _ = rt_train_arrays
             rt_bundle = train_model(rt_train_past, rt_train_future, rt_train_y, cfg, device, task="rt", segment_name=segment_name)
-            rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = build_segment_arrays(
+            rt_valid_arrays = build_segment_arrays(
                 df,
                 valid_days,
                 "realtime_price",
@@ -1955,13 +2118,20 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 end_idx,
                 pred_da_map=None,
                 target_mode=rt_target_mode,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline, rt_valid_hour_ids = rt_valid_arrays
+            else:
+                rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = rt_valid_arrays
+                rt_valid_hour_ids = None
             rt_valid_pred_model = predict_model(
                 rt_bundle,
                 rt_valid_past,
                 rt_valid_future,
                 device,
                 cfg.batch_size,
+                hour_ids=rt_valid_hour_ids,
             )
             rt_valid_pred = restore_target_from_mode(
                 rt_valid_pred_model,
@@ -2042,7 +2212,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                     cfg.calibration_shrink,
                 )
 
-            rt_test_past, rt_test_future, _, rt_test_baseline = build_segment_arrays(
+            rt_test_arrays = build_segment_arrays(
                 df,
                 test_days,
                 "realtime_price",
@@ -2053,13 +2223,20 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 pred_da_map=pred_da_map,
                 target_mode=rt_target_mode,
                 inference_mode=True,
+                return_hour_ids=cfg.rt_916_attn_mask_916,
             )
+            if cfg.rt_916_attn_mask_916:
+                rt_test_past, rt_test_future, _, rt_test_baseline, rt_test_hour_ids = rt_test_arrays
+            else:
+                rt_test_past, rt_test_future, _, rt_test_baseline = rt_test_arrays
+                rt_test_hour_ids = None
             rt_pred_model = predict_model(
                 rt_bundle,
                 rt_test_past,
                 rt_test_future,
                 device,
                 cfg.batch_size,
+                hour_ids=rt_test_hour_ids,
             )
             rt_segment_preds[segment_name] = restore_target_from_mode(
                 rt_pred_model,
@@ -2134,7 +2311,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         }
     else:
         rt_target_mode = resolve_task_target_mode(cfg, "rt")
-        rt_train_past, rt_train_future, rt_train_y, _ = build_arrays(
+        rt_train_arrays = build_arrays(
             df,
             train_days,
             "realtime_price",
@@ -2142,9 +2319,19 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.cutoff_hour_rt,
             pred_da_map=None,
             target_mode=rt_target_mode,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
-        rt_bundle = train_model(rt_train_past, rt_train_future, rt_train_y, cfg, device, task="rt")
-        rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = build_arrays(
+        if cfg.rt_916_attn_mask_916:
+            rt_train_past, rt_train_future, rt_train_y, _, _ = rt_train_arrays
+        else:
+            rt_train_past, rt_train_future, rt_train_y, _ = rt_train_arrays
+        # v21: 启用 9-16 分段头时, 必须传 segment_name="9_16" 让 train_model 激活它
+        rt_segment_name = "9_16" if cfg.rt_916_segment_head_enabled else None
+        rt_bundle = train_model(
+            rt_train_past, rt_train_future, rt_train_y, cfg, device, task="rt",
+            segment_name=rt_segment_name,
+        )
+        rt_valid_arrays = build_arrays(
             df,
             valid_days,
             "realtime_price",
@@ -2152,8 +2339,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             cfg.cutoff_hour_rt,
             pred_da_map=None,
             target_mode=rt_target_mode,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
-        rt_valid_pred_model = predict_model(rt_bundle, rt_valid_past, rt_valid_future, device, cfg.batch_size)
+        if cfg.rt_916_attn_mask_916:
+            rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline, rt_valid_hour_ids = rt_valid_arrays
+        else:
+            rt_valid_past, rt_valid_future, rt_valid_y, rt_valid_baseline = rt_valid_arrays
+            rt_valid_hour_ids = None
+        rt_valid_pred_model = predict_model(rt_bundle, rt_valid_past, rt_valid_future, device, cfg.batch_size, hour_ids=rt_valid_hour_ids)
         rt_valid_pred = restore_target_from_mode(rt_valid_pred_model, rt_valid_baseline, rt_target_mode)
         rt_valid_true = restore_target_from_mode(rt_valid_y, rt_valid_baseline, rt_target_mode)
         rt_affine_obj: Any = None
@@ -2221,7 +2414,7 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
                 cfg.calibration_shrink,
             )
 
-        rt_test_past, rt_test_future, _, rt_test_baseline = build_arrays(
+        rt_test_arrays = build_arrays(
             df,
             test_days,
             "realtime_price",
@@ -2230,8 +2423,14 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
             pred_da_map=pred_da_map,
             target_mode=rt_target_mode,
             inference_mode=True,
+            return_hour_ids=cfg.rt_916_attn_mask_916,
         )
-        rt_pred_model = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size)
+        if cfg.rt_916_attn_mask_916:
+            rt_test_past, rt_test_future, _, rt_test_baseline, rt_test_hour_ids = rt_test_arrays
+        else:
+            rt_test_past, rt_test_future, _, rt_test_baseline = rt_test_arrays
+            rt_test_hour_ids = None
+        rt_pred_model = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size, hour_ids=rt_test_hour_ids)
         rt_preds = restore_target_from_mode(rt_pred_model, rt_test_baseline, rt_target_mode)
         if cfg.rt_calibration_mode == "rt_916_auto":
             rt_preds = apply_rt_916_calibration_mode(

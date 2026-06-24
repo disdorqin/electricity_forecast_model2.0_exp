@@ -4,11 +4,21 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+import joblib
 
 from fusion.classifier_bridge import run_classifier_pipeline
 from fusion.contracts import infer_period, standardize_prediction_table
 from fusion.run_fixed_window_fusion import _apply_fixed_weights
-from fusion.meta_learner_v3 import fit_meta_learners_from_long_table, apply_meta_learners
+from fusion.meta_learner_v3 import (
+    augment_long_table_with_extras,
+    fit_meta_learners_from_long_table,
+    apply_meta_learners,
+)
+from fusion.dynamic_weights import (
+    apply_dynamic_weights,
+    evaluate_dynamic_weights,
+    fit_dynamic_weights,
+)
 from fusion.spike_detector import SpikeDetector, SpikeDetectorConfig
 from fusion.weights import fit_weights_from_long_table
 from fusion.metrics import smape_floor50
@@ -280,7 +290,12 @@ def _collect_stage_predictions(layout, *, file_name: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _to_contract_long_table(df: pd.DataFrame, *, target: str) -> pd.DataFrame:
+def _to_contract_long_table(
+    df: pd.DataFrame,
+    *,
+    target: str,
+    spike_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     out = df.copy()
     out["ds"] = pd.to_datetime(out["时刻"], errors="coerce")
     out["target_day"] = out["ds"].dt.normalize().where(out["ds"].dt.hour != 0, out["ds"].dt.normalize() - pd.Timedelta(days=1))
@@ -293,7 +308,20 @@ def _to_contract_long_table(df: pd.DataFrame, *, target: str) -> pd.DataFrame:
         ["task", "model_name", "target_day", "ds", "period", "hour_business", "y_true", "y_pred"]
     ].copy()
     long_df["target_day"] = pd.to_datetime(long_df["target_day"]).dt.strftime("%Y-%m-%d")
-    return standardize_prediction_table(long_df.dropna(subset=["y_true", "y_pred"]))
+    long_df = standardize_prediction_table(long_df.dropna(subset=["y_true", "y_pred"]))
+
+    # 窗口1 尖峰融合: 把 spike_prob/is_spike 合并到 long_table，让下游学习器能用上。
+    if spike_df is not None and not spike_df.empty:
+        spike = spike_df.copy()
+        if "ds" not in spike.columns and "时刻" in spike.columns:
+            spike["ds"] = pd.to_datetime(spike["时刻"], errors="coerce")
+        spike = spike[["ds", "spike_prob", "is_spike"]] if "spike_prob" in spike.columns else spike
+        spike_cols = [c for c in ("spike_prob", "is_spike") if c in spike.columns]
+        if "ds" in spike.columns and spike_cols:
+            long_df = augment_long_table_with_extras(
+                long_df, spike[["ds"] + spike_cols], join_keys=("ds",)
+            )
+    return long_df
 
 
 def run_learner_stage(args):
@@ -332,10 +360,9 @@ def run_learner_stage(args):
         if not included_models:
             raise RuntimeError(f"No model predictions found for {target}/{run_date} — cannot fit fusion weights")
 
-        contract_df = _to_contract_long_table(val_df, target=target)
-        contract_path = layout.learner_inputs_dir / "validation_long_table.csv"
-        contract_df.to_csv(contract_path, index=False, encoding="utf-8-sig")
-
+        # 先生成 spike_predictions.csv（若 spike_detector 可用），然后用其 join 出来
+        # 增强版的 long_table（含 spike_prob/is_spike）。
+        spike_df_for_long: pd.DataFrame | None = None
         if spike_detector is not None and raw_df is not None:
             try:
                 spike_probs = spike_detector.predict_spike_probability(raw_df)
@@ -346,17 +373,27 @@ def run_learner_stage(args):
                 spike_path = layout.learner_inputs_dir / "spike_predictions.csv"
                 spike_df.to_csv(spike_path, index=False, encoding="utf-8-sig")
                 outputs.append(str(spike_path))
+                spike_df_for_long = spike_df
                 logger.info("Spike predictions saved: %s", spike_path)
             except Exception as exc:
                 logger.warning("Spike prediction failed: %s", exc)
 
+        contract_df = _to_contract_long_table(val_df, target=target, spike_df=spike_df_for_long)
+        contract_path = layout.learner_inputs_dir / "validation_long_table.csv"
+        contract_df.to_csv(contract_path, index=False, encoding="utf-8-sig")
+        spike_coverage = (
+            float(contract_df["spike_prob"].notna().mean())
+            if "spike_prob" in contract_df.columns else 0.0
+        )
+        logger.info(
+            "learner_stage %s/%s: spike_prob coverage=%.2f%% in long table",
+            target, run_date, spike_coverage * 100.0,
+        )
+
+        # ── Meta-learner (Ridge, 可自动用上 spike_prob/is_spike 特征) ──
         models_meta, report_df = fit_meta_learners_from_long_table(
             contract_df,
-            n_estimators=100,
-            max_depth=3,
-            learning_rate=0.1,
-            subsample=0.8,
-            min_samples_leaf=20,
+            alpha=1.0,
             cv_folds=3,
         )
 
@@ -367,14 +404,84 @@ def run_learner_stage(args):
         report_df.to_csv(report_path, index=False, encoding="utf-8-sig")
         outputs.extend([str(meta_learner_path), str(report_path)])
 
+        # ── Period-aware dynamic weights (约束 SLSQP, 9-16 时段内 spike_prob 调控) ──
+        try:
+            dyn_result = fit_dynamic_weights(
+                contract_df,
+                lower_bound=float(getattr(args, "weight_lower_bound", -0.5)),
+                upper_bound=float(getattr(args, "weight_upper_bound", 1.2)),
+            )
+            dyn_weights_path = layout.learner_outputs_dir / "dynamic_weights.csv"
+            dyn_report_path = layout.learner_outputs_dir / "dynamic_weights_report.csv"
+            # 序列化为 joblib: dict 形式方便 fuse_stage 直接载入
+            dyn_joblib_path = layout.learner_outputs_dir / "dynamic_weights.joblib"
+            joblib.dump(
+                {
+                    "weights": dyn_result.weights,
+                    "spike_interpolation": dyn_result.spike_interpolation,
+                },
+                dyn_joblib_path,
+            )
+            # 同时给一个 CSV 给人看
+            flat_rows: list[dict[str, object]] = []
+            for (t, p), wmap in dyn_result.weights.items():
+                for model_name, w in wmap.items():
+                    flat_rows.append(
+                        {
+                            "task": t,
+                            "period": p,
+                            "model_name": model_name,
+                            "weight": float(w),
+                        }
+                    )
+            pd.DataFrame(flat_rows).to_csv(dyn_weights_path, index=False, encoding="utf-8-sig")
+            dyn_result.report.to_csv(dyn_report_path, index=False, encoding="utf-8-sig")
+            outputs.extend([str(dyn_weights_path), str(dyn_report_path), str(dyn_joblib_path)])
+
+            # 在验证集上评估 dynamic weights（含 spike-aware 调控）
+            try:
+                metrics = evaluate_dynamic_weights(
+                    contract_df,
+                    dyn_result.weights,
+                    spike_templates=dyn_result.spike_interpolation,
+                )
+                logger.info(
+                    "  dynamic_weights[%s] val: overall=%.2f%% 1_8=%.2f%% 9_16=%.2f%% 17_24=%.2f%% (rows=%d)",
+                    target,
+                    metrics.get("smape_overall", float("nan")),
+                    metrics.get("smape_1_8", float("nan")),
+                    metrics.get("smape_9_16", float("nan")),
+                    metrics.get("smape_17_24", float("nan")),
+                    metrics.get("rows", 0),
+                )
+            except Exception as exc:
+                logger.warning("evaluate_dynamic_weights failed: %s", exc)
+        except Exception as exc:
+            logger.warning("fit_dynamic_weights failed: %s", exc)
+            # Fallback: 用 fit_weights_from_long_table 保底
+            try:
+                fallback_w_df, _ = fit_weights_from_long_table(
+                    contract_df,
+                    reg=0.1,
+                    lower_bound=float(getattr(args, "weight_lower_bound", -0.5)),
+                    upper_bound=float(getattr(args, "weight_upper_bound", 1.2)),
+                )
+                fallback_path = layout.learner_outputs_dir / "dynamic_weights.csv"
+                fallback_w_df.to_csv(fallback_path, index=False, encoding="utf-8-sig")
+                outputs.append(str(fallback_path))
+            except Exception as exc2:
+                logger.warning("Fallback weights also failed: %s", exc2)
+
         for key, seg in models_meta.items():
+            row = report_df[(report_df["task"] == key[0]) & (report_df["period"] == key[1])]
+            cv_val = float(row["cv_smape"].iloc[0]) if not row.empty else 0.0
+            use_val = bool(row["use_learner"].iloc[0]) if not row.empty else False
+            extras_val = (
+                str(row["extra_features"].iloc[0]) if "extra_features" in row.columns and not row.empty else ""
+            )
             logger.info(
-                "  period=%s best_single=%s(%.2f%%) cv_smape=%.2f%% use_learner=%s",
-                key[1], seg.best_single_model, seg.best_single_smape,
-                report_df[report_df["period"] == key[1]]["cv_smape"].values[0]
-                if len(report_df[report_df["period"] == key[1]]) > 0 else 0.0,
-                report_df[report_df["period"] == key[1]]["use_learner"].values[0]
-                if len(report_df[report_df["period"] == key[1]]) > 0 else False,
+                "  period=%s best_single=%s(%.2f%%) cv_smape=%.2f%% use_learner=%s extras=%s",
+                key[1], seg.best_single_model, seg.best_single_smape, cv_val, use_val, extras_val,
             )
 
     return outputs
@@ -439,6 +546,30 @@ def _build_forecast_long_with_truth(forecast_df: pd.DataFrame, *, target: str) -
     )
 
 
+def _load_spike_for_day(spike_path: Path, run_date: str) -> pd.DataFrame | None:
+    """Load spike_predictions.csv and return the slice for `run_date` (+/-1 day slack)."""
+    if not spike_path.exists():
+        return None
+    try:
+        df = pd.read_csv(spike_path, encoding="utf-8-sig")
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    if "时刻" in df.columns:
+        df["ds"] = pd.to_datetime(df["时刻"], errors="coerce")
+    elif "ds" in df.columns:
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+    else:
+        return None
+    run_ts = pd.Timestamp(run_date)
+    mask = (df["ds"] >= run_ts - pd.Timedelta(days=1)) & (df["ds"] <= run_ts + pd.Timedelta(days=1))
+    df = df[mask].copy()
+    if "spike_prob" not in df.columns:
+        return None
+    return df
+
+
 def run_fuse_stage(args):
     run_date = _resolve_run_date(args)
     targets = ["dayahead", "realtime"] if args.target == "both" else [args.target]
@@ -448,21 +579,127 @@ def run_fuse_stage(args):
     for target in targets:
         layout = build_daily_run_layout(root, run_date, target)
         forecast_df = _collect_stage_predictions(layout, file_name="forecast_predictions.csv")
-        weights_path = layout.learner_outputs_dir / "weights.csv"
-        if not weights_path.exists():
-            raise FileNotFoundError(f"Learner weights not found: {weights_path}")
-        weights_df = pd.read_csv(weights_path, encoding="utf-8-sig")
         normalized = _build_forecast_long_with_truth(forecast_df, target=target)
-        fused = _apply_fixed_weights(
-            normalized,
-            weights_df,
-            task=target,
-            test_start=run_date,
-            test_end=run_date,
-        )
+
+        # ── 读 spike_predictions.csv 并 join 到 normalized (供 dynamic_weights 9-16 调控用) ──
+        spike_path = layout.learner_inputs_dir / "spike_predictions.csv"
+        spike_for_day = _load_spike_for_day(spike_path, run_date)
+        if spike_for_day is not None and not spike_for_day.empty:
+            normalized = augment_long_table_with_extras(
+                normalized, spike_for_day[["ds", "spike_prob", "is_spike"]],
+                join_keys=("ds",),
+            )
+
+        # ── (1) Window1 尖峰融合 dynamic weights (含 spike-aware 9-16 调控) ──
+        dyn_joblib_path = layout.learner_outputs_dir / "dynamic_weights.joblib"
+        dyn_csv_path = layout.learner_outputs_dir / "dynamic_weights.csv"
+        fused = None
+        if dyn_joblib_path.exists():
+            try:
+                dyn_artifact = joblib.load(dyn_joblib_path)
+                weights_dict = dyn_artifact.get("weights", {})
+                spike_templates = dyn_artifact.get("spike_interpolation", {})
+                fused = apply_dynamic_weights(
+                    normalized,
+                    weights_dict,
+                    spike_templates=spike_templates,
+                    spike_col="spike_prob",
+                )
+                dyn_fused_path = layout.final_dir / "fused_dynamic.csv"
+                fused.to_csv(dyn_fused_path, index=False, encoding="utf-8-sig")
+                outputs.append(str(dyn_fused_path))
+                logger.info(
+                    "fuse_stage %s/%s: dynamic weights applied (Window1 spike-aware).",
+                    target, run_date,
+                )
+            except Exception as exc:
+                logger.warning("apply_dynamic_weights failed: %s", exc)
+        elif dyn_csv_path.exists():
+            # Fallback: 仅 CSV (旧格式，无 spike-aware 9-16 调控)
+            try:
+                dyn_weights_df = pd.read_csv(dyn_csv_path, encoding="utf-8-sig")
+                val_df_for_completion = _collect_stage_predictions(layout, file_name="val_predictions.csv")
+                try:
+                    dyn_weights_df = _ensure_complete_period_weights(
+                        dyn_weights_df,
+                        _to_contract_long_table(val_df_for_completion, target=target),
+                        target=target,
+                    )
+                except Exception:
+                    pass
+                fused = _apply_fixed_weights(
+                    normalized, dyn_weights_df,
+                    task=target, test_start=run_date, test_end=run_date,
+                )
+                dyn_fused_path = layout.final_dir / "fused_dynamic.csv"
+                fused.to_csv(dyn_fused_path, index=False, encoding="utf-8-sig")
+                outputs.append(str(dyn_fused_path))
+                logger.info(
+                    "fuse_stage %s/%s: dynamic weights (legacy csv) applied.",
+                    target, run_date,
+                )
+            except Exception as exc:
+                logger.warning("Fallback dynamic csv apply failed: %s", exc)
+
+        # ── (2) v3 meta learner (Ridge per (task, period)) ──
+        meta_learner_path = layout.learner_outputs_dir / "meta_learner.joblib"
+        fused_meta = None
+        if meta_learner_path.exists():
+            models_meta = joblib.load(meta_learner_path)
+            fused_meta = apply_meta_learners(
+                normalized,
+                models_meta,
+                task=target,
+                test_start=run_date,
+                test_end=run_date,
+            )
+            meta_fused_path = layout.final_dir / "fused_meta_learner.csv"
+            fused_meta.to_csv(meta_fused_path, index=False, encoding="utf-8-sig")
+            outputs.append(str(meta_fused_path))
+        else:
+            logger.warning("Meta learner not found: %s", meta_learner_path)
+
+        # ── (3) Default output = dynamic weights (Window1 首选) if available, else meta learner ──
+        if fused is not None and "y_fused" in fused.columns:
+            final = fused
+        elif fused_meta is not None:
+            final = fused_meta
+        else:
+            raise FileNotFoundError("No fusion artifacts (dynamic_weights or meta_learner) available.")
+
         output_path = layout.final_dir / "fused_predictions.csv"
-        fused.to_csv(output_path, index=False, encoding="utf-8-sig")
+        final.to_csv(output_path, index=False, encoding="utf-8-sig")
         outputs.append(str(output_path))
+
+        if "y_true" in final.columns and "y_fused" in final.columns:
+            valid = final.dropna(subset=["y_true", "y_fused"])
+            if len(valid) > 0:
+                smape_val = smape_floor50(valid["y_true"].values, valid["y_fused"].values)
+                logger.info("fuse_stage %s/%s: SMAPE=%.2f%% Accuracy=%.2f%%", target, run_date, smape_val, 100 - smape_val)
+
+        # 按 period + spike_regime 分别汇报 (window1 关心的 9-16 在这里)
+        try:
+            if "spike_regime" in final.columns and "y_true" in final.columns:
+                valid = final.dropna(subset=["y_true", "y_fused"])
+                if not valid.empty:
+                    for period in ("1_8", "9_16", "17_24"):
+                        sub = valid[valid["period"] == period]
+                        if not sub.empty:
+                            smp = smape_floor50(sub["y_true"].values, sub["y_fused"].values)
+                            logger.info(
+                                "fuse_stage %s/%s: per-period %s SMAPE=%.2f%% (n=%d)",
+                                target, run_date, period, smp, len(sub),
+                            )
+                    for regime in ("neutral", "sgdfnet_heavy", "rt916_heavy"):
+                        sub = valid[valid["spike_regime"] == regime]
+                        if not sub.empty:
+                            smp = smape_floor50(sub["y_true"].values, sub["y_fused"].values)
+                            logger.info(
+                                "fuse_stage %s/%s: spike_regime=%s SMAPE=%.2f%% (n=%d)",
+                                target, run_date, regime, smp, len(sub),
+                            )
+        except Exception as exc:
+            logger.warning("per-period reporting failed: %s", exc)
 
     return outputs
 

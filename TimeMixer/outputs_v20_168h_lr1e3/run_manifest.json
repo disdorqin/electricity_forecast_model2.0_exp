@@ -1,0 +1,581 @@
+{
+  "model_name": "TimeMixer",
+  "pipeline_mode": "single_task",
+  "backbone": "timesnet",
+  "rt_916_backbone": null,
+  "month": "2026-06",
+  "explicit_test_start": null,
+  "explicit_test_end_exclusive": null,
+  "data_path": "D:\\作业\\大创_挑战杯_互联网\\大学生创新创业计划\\大创实现\\其他资料\\epf\\data\\shandong_pmos_hourly.csv",
+  "output_dir": "TimeMixer\\outputs_v20_168h_lr1e3",
+  "entry_script": "fusion/runners/run_timemixer_export.py",
+  "train_start": "2025-06-01 00:00:00",
+  "valid_start": "2026-03-20 00:00:00",
+  "test_start": "2026-06-01 00:00:00",
+  "test_end_exclusive": "2026-07-01 00:00:00",
+  "train_months": 12,
+  "training_mode": "rolling",
+  "frozen_train_start": null,
+  "frozen_train_end_exclusive": null,
+  "decomposition_mode": "none",
+  "val_ratio": 0.2,
+  "seq_len": 168,
+  "segment_training": false,
+  "target_mode": "residual_blend",
+  "da_target_mode": "residual_blend",
+  "rt_target_mode": "residual_blend",
+  "da_calibration_mode": "none",
+  "da_loss_mode": "l1",
+  "da_under_weight_multiplier": 1.25,
+  "rt_calibration_mode": "rt_916_auto",
+  "rt_loss_mode": "l1",
+  "rt_risk_profile": "baseline",
+  "rt_peak_weight_multiplier": 1.4,
+  "rt_normal_focus_multiplier": 1.2,
+  "calibration_shrink": 0.5,
+  "affine_clip_min": 0.7,
+  "affine_clip_max": 1.3,
+  "regime_solar_ratio_threshold": 0.28,
+  "regime_bidding_ratio_threshold": 0.08,
+  "regime_bidding_space_threshold": 4000.0,
+  "peak_da_threshold": 300.0,
+  "peak_bidding_space_threshold": 22000.0,
+  "peak_solar_ratio_max": 0.22,
+  "cutoff_hour_da": 15,
+  "cutoff_hour_rt": 15,
+  "device": "cpu",
+  "seed": 42,
+  "epochs": 40,
+  "batch_size": 32,
+  "hidden_dim": 128,
+  "blocks": 4,
+  "scales": 3,
+  "dropout": 0.15,
+  "rt_segment_head_mode": "none",
+  "rt_916_loss_weight": 1.0,
+  "rt_916_spike_penalty": 0.0,
+  "rt_916_spike_threshold": 350.0,
+  "da_916_loss_weight": 1.0,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "patience": 15,
+  "da_best_valid_mae_scaled": 0.33899614113872334,
+  "rt_best_valid_mae_scaled": 0.6390648858021881,
+  "da_stopped_early": true,
+  "rt_stopped_early": true,
+  "da_segment_bias": null,
+  "rt_segment_bias": null,
+  "rt_segment_affine": {
+    "selected_mode": "rt_916_spike_day_affine",
+    "affine": {
+      "base_calibrator": {
+        "stress_affine": [
+          0.7,
+          -3.8624334386395764
+        ],
+        "normal_affine": [
+          0.7,
+          200.2384155109413
+        ],
+        "stress_count": 456,
+        "normal_count": 1296,
+        "thresholds": {
+          "solar_ratio": 0.28,
+          "bidding_ratio": 0.08,
+          "bidding_space": 4000.0
+        }
+      },
+      "selected_rule": {
+        "type": "solar_mean_high_and_bidding_min_low_and_da_mean_low",
+        "thresholds": {
+          "solar_mean_min": 7177.375562499999,
+          "bidding_min_max": -15123.9045,
+          "da_mean_max": 292.61843333333337
+        }
+      },
+      "selected_day_count": 16,
+      "selected_hour_count": 384,
+      "spike_affine": [
+        0.7349646006398204,
+        10.144060275982635
+      ],
+      "scores": [
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 7,
+          "hour_count": 168,
+          "spike_affine": [
+            0.7038596331209681,
+            -7.749773506360407
+          ],
+          "smape": 26.67066183089509,
+          "mae": 106.98558137066172
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 8,
+          "hour_count": 192,
+          "spike_affine": [
+            0.7301307476199411,
+            -3.646987051283609
+          ],
+          "smape": 26.676445365150443,
+          "mae": 106.95261331685845
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 11,
+          "hour_count": 264,
+          "spike_affine": [
+            0.738798571044058,
+            15.31145512897438
+          ],
+          "smape": 26.768713628609152,
+          "mae": 106.6921685647064
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 8,
+          "hour_count": 192,
+          "spike_affine": [
+            0.7,
+            -6.249186853587793
+          ],
+          "smape": 26.39149172959391,
+          "mae": 105.59471942343298
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7186757935451219,
+            -2.7169003157278966
+          ],
+          "smape": 26.42367011322635,
+          "mae": 105.64082218962828
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 14,
+          "hour_count": 336,
+          "spike_affine": [
+            0.730350130975401,
+            14.783546611154776
+          ],
+          "smape": 26.582625554659366,
+          "mae": 105.07528910906183
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7024003132017472,
+            -7.228185254444983
+          ],
+          "smape": 26.180440580321395,
+          "mae": 104.6961565087585
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 10,
+          "hour_count": 240,
+          "spike_affine": [
+            0.7234244013480602,
+            -4.087987300165921
+          ],
+          "smape": 26.194301780994394,
+          "mae": 104.69936135035637
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7177.375562499999,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 16,
+          "hour_count": 384,
+          "spike_affine": [
+            0.7349646006398204,
+            10.144060275982635
+          ],
+          "smape": 26.133736404759546,
+          "mae": 103.1803421547033
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7190931573864299,
+            -5.9937736507865225
+          ],
+          "smape": 26.919826686096183,
+          "mae": 108.23227702843252
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 7,
+          "hour_count": 168,
+          "spike_affine": [
+            0.7467781612607826,
+            -1.4932725885266822
+          ],
+          "smape": 26.921316525446343,
+          "mae": 108.15103256860321
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7361685764983099,
+            15.553977801709054
+          ],
+          "smape": 26.930675845790997,
+          "mae": 107.77544240942237
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 7,
+          "hour_count": 168,
+          "spike_affine": [
+            0.7058762709280222,
+            -4.523161587604128
+          ],
+          "smape": 26.650976738445344,
+          "mae": 106.85777151885222
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 8,
+          "hour_count": 192,
+          "spike_affine": [
+            0.731236808307714,
+            -0.7126684067100139
+          ],
+          "smape": 26.682277037322528,
+          "mae": 106.90034823178969
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 12,
+          "hour_count": 288,
+          "spike_affine": [
+            0.7269449087283788,
+            14.873853351096576
+          ],
+          "smape": 26.74916041455396,
+          "mae": 106.17122992916052
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 8,
+          "hour_count": 192,
+          "spike_affine": [
+            0.7133127671391563,
+            -5.9012798225433185
+          ],
+          "smape": 26.42963936229115,
+          "mae": 105.94434183654835
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7353813227530738,
+            -2.5265723771698134
+          ],
+          "smape": 26.449789269549978,
+          "mae": 105.9484219553623
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7562.789375,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 13,
+          "hour_count": 312,
+          "spike_affine": [
+            0.7299155748941679,
+            12.447839901371012
+          ],
+          "smape": 26.5394656356261,
+          "mae": 105.25573253405409
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 5,
+          "hour_count": 120,
+          "spike_affine": [
+            0.7,
+            -7.878094159555301
+          ],
+          "smape": 26.79155202266538,
+          "mae": 107.63267653931186
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 5,
+          "hour_count": 120,
+          "spike_affine": [
+            0.7,
+            -7.878094159555301
+          ],
+          "smape": 26.79155202266538,
+          "mae": 107.63267653931186
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -19235.9235,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7,
+            10.843612749714646
+          ],
+          "smape": 26.91331618999473,
+          "mae": 107.96310908439875
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7,
+            -5.910603469147117
+          ],
+          "smape": 26.51426992997974,
+          "mae": 106.25636518983703
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7,
+            -5.910603469147117
+          ],
+          "smape": 26.51426992997974,
+          "mae": 106.25636518983703
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -16344.105000000001,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7,
+            10.89013608977773
+          ],
+          "smape": 26.699697011589297,
+          "mae": 106.23453910522815
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 250.59393333333333
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7,
+            -5.910603469147117
+          ],
+          "smape": 26.51426992997974,
+          "mae": 106.25636518983703
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 268.5546583333333
+          },
+          "day_count": 6,
+          "hour_count": 144,
+          "spike_affine": [
+            0.7,
+            -5.910603469147117
+          ],
+          "smape": 26.51426992997974,
+          "mae": 106.25636518983703
+        },
+        {
+          "thresholds": {
+            "solar_mean_min": 7906.165708333334,
+            "bidding_min_max": -15123.9045,
+            "da_mean_max": 292.61843333333337
+          },
+          "day_count": 9,
+          "hour_count": 216,
+          "spike_affine": [
+            0.7,
+            10.89013608977773
+          ],
+          "smape": 26.699697011589297,
+          "mae": 106.23453910522815
+        }
+      ]
+    },
+    "bias": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scores": [
+      {
+        "mode": "rt_916_spike_day_affine",
+        "smape": 26.133736404759546,
+        "mae": 103.1803421547033
+      },
+      {
+        "mode": "rt_916_regime_affine_hourbias",
+        "smape": 26.892084794773336,
+        "mae": 104.39976727450386
+      },
+      {
+        "mode": "rt_916_regime_affine",
+        "smape": 27.53715760550816,
+        "mae": 111.83782985995029
+      },
+      {
+        "mode": "rt_916_peak_regime_bias",
+        "smape": 27.66486625388059,
+        "mae": 111.4808775255571
+      },
+      {
+        "mode": "none",
+        "smape": 28.75439758027395,
+        "mae": 115.31968212039395
+      },
+      {
+        "mode": "rt_916_affine",
+        "smape": 29.56083422787436,
+        "mae": 107.03592862250147
+      },
+      {
+        "mode": "rt_916_peak_regime_affine",
+        "smape": 31.947196469142003,
+        "mae": 138.80099580801516
+      }
+    ]
+  },
+  "protocol_findings": [
+    {
+      "severity": "info",
+      "item": "pipeline_mode",
+      "detail": "当前运行链已显式标记为 single_task，结果不得与其他 mode 混用。"
+    }
+  ]
+}

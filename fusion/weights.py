@@ -19,6 +19,7 @@ class WeightFitResult:
 
 
 def _project_with_bounds(values: np.ndarray, lower_bound: float, upper_bound: float) -> np.ndarray:
+    values = np.asarray(values, dtype=float).ravel()
     n = len(values)
     if n == 1:
         return np.array([1.0], dtype=float)
@@ -31,6 +32,11 @@ def _project_with_bounds(values: np.ndarray, lower_bound: float, upper_bound: fl
     free = np.ones(n, dtype=bool)
     weights = clipped.copy()
     target = 1.0
+    # Track whether the loop pinned any weight to a bound. If nothing
+    # was pinned we already have a valid solution and must NOT run the
+    # post-loop redistribution (which would clobber the rebalanced
+    # weights back to a uniform distribution).
+    any_pinned = False
 
     for _ in range(20):
         if not free.any():
@@ -47,16 +53,18 @@ def _project_with_bounds(values: np.ndarray, lower_bound: float, upper_bound: fl
             if is_below:
                 weights[idx_local] = lower_bound
                 free[idx_local] = False
+                any_pinned = True
             elif is_above:
                 weights[idx_local] = upper_bound
                 free[idx_local] = False
+                any_pinned = True
         target = 1.0 - weights[~free].sum()
     else:
         if free.any():
             free_idx = np.where(free)[0]
             weights[free_idx] = target / len(free_idx)
 
-    if free.any():
+    if any_pinned and free.any():
         free_idx = np.where(free)[0]
         remaining = 1.0 - weights[~free].sum()
         weights[free_idx] = np.clip(remaining / len(free_idx), lower_bound, upper_bound)

@@ -1,0 +1,2 @@
+﻿severity,item,detail
+info,pipeline_mode,当前运行链已显式标记为 single_task，结果不得与其他 mode 混用。

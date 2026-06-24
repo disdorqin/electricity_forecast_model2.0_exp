@@ -95,7 +95,12 @@ def build_wide_frame(df: pd.DataFrame) -> pd.DataFrame:
     if not conflicts.empty:
         raise ValueError("Found inconsistent y_true values for the same target point across models")
 
-    truth_df = standardized[id_cols + ["y_true"]].drop_duplicates(subset=id_cols)
+    # Preserve non-prediction, non-id, non-truth columns (e.g. spike_prob/is_spike)
+    # by collapsing them with first-occurrence semantics — the spike_detector
+    # signal is shared across all model rows for the same timestamp.
+    reserved = set(id_cols) | {"model_name", "y_pred", "y_true"}
+    extra_cols = [c for c in standardized.columns if c not in reserved]
+    truth_df = standardized[id_cols + ["y_true"] + extra_cols].drop_duplicates(subset=id_cols)
     pred_wide = (
         standardized.pivot_table(
             index=id_cols,

@@ -1,0 +1,74 @@
+{
+  "test_days": [
+    "2026-05-15",
+    "2026-06-17",
+    "2026-06-18"
+  ],
+  "asof_ts_train": "2026-06-18 15:00:00",
+  "baseline_train": {
+    "model_variant": "baseline",
+    "train_seconds": 7.632292032241821,
+    "asof_ts": "2026-06-18 15:00:00",
+    "save_dir": "D:\\作业\\大创_挑战杯_互联网\\大学生创新创业计划\\大创实现\\其他资料\\electricity_forecast_model2.0_exp\\outputs\\RT916_SpikeMarketLab\\model_packages\\RT916_SpikeFusionNet\\artifacts\\实时电价_分段\\w4_baseline",
+    "epochs": 8,
+    "batch_size": 64,
+    "months": 4
+  },
+  "v2_train": {
+    "model_variant": "v1_v2_smape",
+    "train_seconds": 7.007662057876587,
+    "asof_ts": "2026-06-18 15:00:00",
+    "save_dir": "D:\\作业\\大创_挑战杯_互联网\\大学生创新创业计划\\大创实现\\其他资料\\electricity_forecast_model2.0_exp\\outputs\\RT916_SpikeMarketLab\\model_packages\\RT916_SpikeFusionNet\\artifacts\\实时电价_分段\\w4_v1_v2_smape",
+    "epochs": 10,
+    "batch_size": 64,
+    "months": 4
+  },
+  "per_day": [
+    {
+      "day": "2026-05-15",
+      "n_hours": 8,
+      "smape_baseline": 0.3069901867518743,
+      "smape_v2_da": 0.3069901867518743,
+      "delta_smape": 0.0,
+      "mae_baseline": 112.33585888481139,
+      "mae_v2_da": 188.59269982910155,
+      "rmse_baseline": 214.35882849085164,
+      "rmse_v2_da": 278.19670202229145,
+      "pred_baseline_path": "outputs_v2_916/pred_2026-05-15_baseline.csv",
+      "pred_v2_da_path": "outputs_v2_916/pred_2026-05-15_v2_da.csv"
+    },
+    {
+      "day": "2026-06-17",
+      "n_hours": 8,
+      "smape_baseline": 0.6934862476775958,
+      "smape_v2_da": 1.1076985724106645,
+      "delta_smape": -0.4142123247330687,
+      "mae_baseline": 199.95697166442872,
+      "mae_v2_da": 360.1323069763183,
+      "rmse_baseline": 237.88480111531732,
+      "rmse_v2_da": 424.05188709293157,
+      "pred_baseline_path": "outputs_v2_916/pred_2026-06-17_baseline.csv",
+      "pred_v2_da_path": "outputs_v2_916/pred_2026-06-17_v2_da.csv"
+    },
+    {
+      "day": "2026-06-18",
+      "n_hours": 8,
+      "smape_baseline": 0.09345138994833262,
+      "smape_v2_da": 0.32073711572019115,
+      "delta_smape": -0.22728572577185852,
+      "mae_baseline": 33.39458856201173,
+      "mae_v2_da": 149.8871573486328,
+      "rmse_baseline": 39.968194016006,
+      "rmse_v2_da": 160.33859724855247,
+      "pred_baseline_path": "outputs_v2_916/pred_2026-06-18_baseline.csv",
+      "pred_v2_da_path": "outputs_v2_916/pred_2026-06-18_v2_da.csv"
+    }
+  ],
+  "aggregate": {
+    "smape_baseline_mean_9_16": 0.36464260812593424,
+    "smape_v2_da_mean_9_16": 0.5784752916275767,
+    "delta_smape_mean_9_16": -0.21383268350164247,
+    "subgoal_30pct": false,
+    "target_1pct_improvement": false
+  }
+}

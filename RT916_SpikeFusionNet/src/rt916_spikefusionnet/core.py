@@ -19,16 +19,18 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from rt916_spikefusionnet.dataprocess import (
-    enrich_selected_features,
-    recompute_target_dependent_selected_features,
+    enrich_da_linkage_features,
     enrich_period_local_features,
+    enrich_selected_features,
+    inject_external_da_predictions,
+    recompute_target_dependent_selected_features,
     feature_engineer_solar_terms,
     process_features,
     split_excel_by_hours,
 )
-from rt916_spikefusionnet.annual_model import AnnualSpikeGatedTimesNet
+from rt916_spikefusionnet.annual_model import AnnualSpikeGatedTimesNet, AnnualSpikeGatedTimesNetV2
 from rt916_spikefusionnet.annual_model_da_timemixer import DayAheadTimeMixerNet
-from rt916_spikefusionnet.annual_loss import AnnualProtectedCappedLoss
+from rt916_spikefusionnet.annual_loss import AnnualProtectedCappedLoss, SegmentedSMAPECappedLoss
 
 warnings.filterwarnings("ignore", message="enable_nested_tensor is True")
 load_dotenv()
@@ -154,39 +156,95 @@ def _make_inputs(target):
                 "ramp_solar_pred",
             ]
     else:
-        history = [
-            "直调负荷实际值",
-            "联络线受电负荷实际值",
-            "新能源总加实际值",
-            "竞价空间实际值",
-            "总用电量",
-            "其他负荷总加",
-            "净负荷",
-            "新能源渗透率",
-            "空间_新能源比",
-            *base_calendar,
-            "lag_48h",
-            "lag_168h",
-            "target_lag",
-            "ramp_load",
-            "ramp_solar",
-            "日前电价",
-        ]
-        future = [
-            "直调负荷预测值",
-            "联络线受电负荷预测值",
-            "新能源总加预测值",
-            "竞价空间预测值",
-            "总用电量预测值",
-            "其他负荷总加预测值",
-            "净负荷预测值",
-            "新能源渗透率预测值",
-            "空间_新能源比预测值",
-            *base_calendar,
-            "ramp_load_pred",
-            "ramp_solar_pred",
-            "日前电价",
-        ]
+        # W4: RT 路径注入 DA→RT 联动特征 (da_pred_today/da_pred_tomorrow/
+        #     da_error_24h/da_ramp_pred_to_actual/da_pred_24h_lag/da_pred_48h_lag/
+        #     da_ramp_first_8/da_ramp_mid_8)
+        #     开关:SPIKE_RT916_DA_LINKAGE (默认 1)
+        _use_da_linkage = bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1")))
+        if _use_da_linkage:
+            history = [
+                "直调负荷实际值",
+                "联络线受电负荷实际值",
+                "新能源总加实际值",
+                "竞价空间实际值",
+                "总用电量",
+                "其他负荷总加",
+                "净负荷",
+                "新能源渗透率",
+                "空间_新能源比",
+                *base_calendar,
+                "lag_48h",
+                "lag_168h",
+                "target_lag",
+                "ramp_load",
+                "ramp_solar",
+                "日前电价",
+                # === DA 联动特征(W4) ===
+                "da_pred_today",
+                "da_pred_tomorrow",
+                "da_pred_24h_lag",
+                "da_pred_48h_lag",
+                "da_error_24h",
+                "da_ramp_first_8",
+                "da_ramp_mid_8",
+                "da_ramp_pred_to_actual",
+            ]
+            future = [
+                "直调负荷预测值",
+                "联络线受电负荷预测值",
+                "新能源总加预测值",
+                "竞价空间预测值",
+                "总用电量预测值",
+                "其他负荷总加预测值",
+                "净负荷预测值",
+                "新能源渗透率预测值",
+                "空间_新能源比预测值",
+                *base_calendar,
+                "ramp_load_pred",
+                "ramp_solar_pred",
+                "日前电价",
+                # === DA 联动特征(W4): 预测期(已签发)也用实际+DA注入代理 ===
+                "da_pred_today",
+                "da_pred_tomorrow",
+                "da_error_24h",
+                "da_ramp_first_8",
+                "da_ramp_mid_8",
+                "da_ramp_pred_to_actual",
+            ]
+        else:
+            history = [
+                "直调负荷实际值",
+                "联络线受电负荷实际值",
+                "新能源总加实际值",
+                "竞价空间实际值",
+                "总用电量",
+                "其他负荷总加",
+                "净负荷",
+                "新能源渗透率",
+                "空间_新能源比",
+                *base_calendar,
+                "lag_48h",
+                "lag_168h",
+                "target_lag",
+                "ramp_load",
+                "ramp_solar",
+                "日前电价",
+            ]
+            future = [
+                "直调负荷预测值",
+                "联络线受电负荷预测值",
+                "新能源总加预测值",
+                "竞价空间预测值",
+                "总用电量预测值",
+                "其他负荷总加预测值",
+                "净负荷预测值",
+                "新能源渗透率预测值",
+                "空间_新能源比预测值",
+                *base_calendar,
+                "ramp_load_pred",
+                "ramp_solar_pred",
+                "日前电价",
+            ]
     history.append(target)
     return history, future
 
@@ -243,6 +301,7 @@ def _inject_predicted_da_for_rt(df, asof_ts=None, external_da_pred_df=None):
     For RT inference only:
     - Keep D-day known part unchanged.
     - Replace DA feature after asof by predicted DA (if provided).
+    - W4: also call enrich_da_linkage_features to add da_pred_*/da_error_24h etc.
     """
     if CONFIG["OUTPUT"] != "实时电价":
         return df
@@ -269,6 +328,11 @@ def _inject_predicted_da_for_rt(df, asof_ts=None, external_da_pred_df=None):
         out["日前电价"] = out["pred_da"].where(out["pred_da"].notna(), out["日前电价"])
 
     out = out.drop(columns=["pred_da"])
+
+    # W4: 在 asof cutoff 之前调用 DA→RT 联动特征工程
+    if CONFIG.get("ENABLE_DA_LINKAGE", False):
+        out = enrich_da_linkage_features(out, da_pred_series=None)
+
     return out
 
 
@@ -422,7 +486,11 @@ def _build_model(num_variates, seq_len, pred_len, cfg):
             )
     else:
         known_target_len = seq_len - 2 * pred_len
-    return AnnualSpikeGatedTimesNet(
+    # W4: RT 路径可选 V2(带 9-16 segment head)模型
+    use_v2 = bool(int(os.getenv("SPIKE_RT916_USE_V2", "1" if cfg["OUTPUT"] == "实时电价" else "0")))
+    model_cls = AnnualSpikeGatedTimesNetV2 if use_v2 else AnnualSpikeGatedTimesNet
+    # segment_head_scale 仅 V2 接收
+    common_kwargs = dict(
         num_variates=num_variates,
         seq_len=seq_len,
         pred_len=pred_len,
@@ -435,6 +503,10 @@ def _build_model(num_variates, seq_len, pred_len, cfg):
         known_target_len=known_target_len,
         delta_scale=cfg["DELTA_SCALE"],
     )
+    if use_v2:
+        _seg_scale = float(os.getenv("SPIKE_RT916_SEGMENT_HEAD_SCALE", "0.20"))
+        common_kwargs["segment_head_scale"] = _seg_scale
+    return model_cls(**common_kwargs)
 
 
 def _get_periods(df, mod):
@@ -549,16 +621,35 @@ def train_single_period(period_name, train_df):
 
     low_thr = np.quantile(train_target_scaled, CONFIG["TAIL_LOW_Q"])
     high_thr = np.quantile(train_target_scaled, CONFIG["TAIL_HIGH_Q"])
-    criterion = AnnualProtectedCappedLoss(
-        low_thr=low_thr,
-        high_thr=high_thr,
-        alpha=CONFIG["TAIL_ALPHA"],
-        diff_alpha=CONFIG["TAIL_DIFF_ALPHA"],
-        huber_beta=CONFIG["HUBER_BETA"],
-        mse_gamma=CONFIG["MSE_GAMMA"],
-        protected_weight=1.5,
-        editable_horizon=(9, 16),
-    )
+    # 计算 unscaled target_max (用于把业务 SMAPE-floor50 换算到归一化空间)
+    target_max_unscaled = float(np.nanmax(target_feature)) if len(target_feature) > 0 else 600.0
+    use_smape_loss = bool(int(os.getenv("SPIKE_RT916_SMAPE_LOSS", "1" if CONFIG["OUTPUT"] == "实时电价" else "0")))
+    if use_smape_loss and CONFIG["OUTPUT"] == "实时电价":
+        # W4: 对 9-16 segment 使用 SMAPE-floor50 业务目标
+        criterion = SegmentedSMAPECappedLoss(
+            low_thr=low_thr,
+            high_thr=high_thr,
+            alpha=CONFIG["TAIL_ALPHA"],
+            diff_alpha=CONFIG["TAIL_DIFF_ALPHA"],
+            huber_beta=CONFIG["HUBER_BETA"],
+            mse_gamma=CONFIG["MSE_GAMMA"],
+            protected_weight=1.5,
+            editable_horizon=(9, 16),
+            smape_alpha=1.0,
+            smape_floor=50.0,
+            target_max_unscaled=target_max_unscaled,
+        )
+    else:
+        criterion = AnnualProtectedCappedLoss(
+            low_thr=low_thr,
+            high_thr=high_thr,
+            alpha=CONFIG["TAIL_ALPHA"],
+            diff_alpha=CONFIG["TAIL_DIFF_ALPHA"],
+            huber_beta=CONFIG["HUBER_BETA"],
+            mse_gamma=CONFIG["MSE_GAMMA"],
+            protected_weight=1.5,
+            editable_horizon=(9, 16),
+        )
 
     optimizer = optim.AdamW(model.parameters(), lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"])
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -846,6 +937,12 @@ def train_interface(target="实时电价", start_end_list=None, mod="all"):
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
+    # W4: 注入 DA→RT 联动特征 (训练时把"日前电价"视作"DA 模型输出"的代理)
+    if target == "实时电价" and bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+        CONFIG["ENABLE_DA_LINKAGE"] = True
+        df_raw = enrich_da_linkage_features(df_raw, da_pred_series=None)
+    else:
+        CONFIG["ENABLE_DA_LINKAGE"] = False
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -865,6 +962,11 @@ def run(target="实时电价", start_end_list=None, mod="all", asof_ts=None, enf
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
+    if target == "实时电价" and bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+        CONFIG["ENABLE_DA_LINKAGE"] = True
+        df_raw = enrich_da_linkage_features(df_raw, da_pred_series=None)
+    else:
+        CONFIG["ENABLE_DA_LINKAGE"] = False
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -925,6 +1027,11 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
+    if target == "实时电价" and bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+        CONFIG["ENABLE_DA_LINKAGE"] = True
+        df_raw = enrich_da_linkage_features(df_raw, da_pred_series=None)
+    else:
+        CONFIG["ENABLE_DA_LINKAGE"] = False
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])
@@ -1027,6 +1134,11 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col="实时电价")
+    if bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+        CONFIG["ENABLE_DA_LINKAGE"] = True
+        df_raw = enrich_da_linkage_features(df_raw, da_pred_series=None)
+    else:
+        CONFIG["ENABLE_DA_LINKAGE"] = False
     df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
 
     test_start = pd.Timestamp(start_end_list[0])

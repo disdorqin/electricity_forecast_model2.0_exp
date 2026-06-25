@@ -1,0 +1,59 @@
+{
+  "overall_risk": "low",
+  "checks": [
+    {
+      "name": "24h_per_day",
+      "passed": true,
+      "severity": "info",
+      "detail": "All 31 days have exactly 24 hours"
+    },
+    {
+      "name": "duplicate_ds",
+      "passed": true,
+      "severity": "info",
+      "detail": "No duplicate (target_day, ds) pairs"
+    },
+    {
+      "name": "missing_midnight",
+      "passed": true,
+      "severity": "info",
+      "detail": "Both hour_business=1 and 24 present"
+    },
+    {
+      "name": "hour_business_range",
+      "passed": true,
+      "severity": "info",
+      "detail": "All hour_business values in 1-24"
+    },
+    {
+      "name": "period_labels",
+      "passed": true,
+      "severity": "info",
+      "detail": "All period labels match hour_business"
+    },
+    {
+      "name": "business_day",
+      "passed": true,
+      "severity": "info",
+      "detail": "business_day column present and consistent"
+    },
+    {
+      "name": "y_pred_nan",
+      "passed": true,
+      "severity": "info",
+      "detail": "No NaN values in y_pred"
+    },
+    {
+      "name": "y_pred_outliers",
+      "passed": true,
+      "severity": "info",
+      "detail": "y_pred range: [-73.7, 533.9]"
+    },
+    {
+      "name": "coverage",
+      "passed": true,
+      "severity": "info",
+      "detail": "Coverage: 100.0% (744/744)"
+    }
+  ]
+}

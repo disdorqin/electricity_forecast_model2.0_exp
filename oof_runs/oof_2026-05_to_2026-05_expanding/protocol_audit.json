@@ -1,0 +1,37 @@
+{
+  "pool_id": "oof_2026-05_to_2026-05_expanding",
+  "generated_at": "2026-06-25T10:35:14.949482",
+  "overall_risk": "high",
+  "checks": [
+    {
+      "name": "all_folds_success",
+      "passed": false,
+      "severity": "error",
+      "detail": "4 fold(s) failed"
+    },
+    {
+      "name": "long_table_nonempty",
+      "passed": true,
+      "severity": "info",
+      "detail": "Long table has 1491 rows"
+    },
+    {
+      "name": "cross_model_alignment_dayahead",
+      "passed": false,
+      "severity": "error",
+      "detail": "dayahead: alignment issues - lightgbm: missing 0, extra 744; rt916: missing 0, extra 1"
+    },
+    {
+      "name": "cross_model_alignment_realtime",
+      "passed": false,
+      "severity": "error",
+      "detail": "realtime: alignment issues - lightgbm: missing 0, extra 744; sgdfnet: missing 0, extra 1; rt916: missing 0, extra 1"
+    }
+  ],
+  "summary": {
+    "total_folds": 1,
+    "total_results": 10,
+    "successful": 6,
+    "failed": 4
+  }
+}

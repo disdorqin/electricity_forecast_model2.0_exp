@@ -425,10 +425,18 @@ def normalize_long_table(
 
     # 列名自动映射：各模型输出列名各不相同，统一到 long-table 标准名
     _COLUMN_RENAME_MAP: dict[str, str] = {
+        # 真实值列
         "y": "y_true",
+        "actual": "y_true",
+        # 预测值列
         "pred_y": "y_pred",
         "price": "y_pred",
         "predictions": "y_pred",
+        "预测值": "y_pred",
+        "prediction": "y_pred",
+        # 时间列
+        "timestamp": "ds",
+        "时刻": "ds",
     }
     for src, dst in _COLUMN_RENAME_MAP.items():
         if src in result.columns and dst not in result.columns:

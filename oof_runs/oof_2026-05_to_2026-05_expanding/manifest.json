@@ -1,0 +1,29 @@
+{
+  "oof_pool_id": "oof_2026-05_to_2026-05_expanding",
+  "generated_at": "2026-06-25T10:35:14.960369",
+  "date_range_start": "2026-05-01",
+  "date_range_end": "2026-05-31",
+  "folds": [
+    {
+      "fold_id": 0,
+      "train_start": "2023-01-01",
+      "train_end": "2026-04-30",
+      "test_start": "2026-05-01",
+      "test_end": "2026-05-31",
+      "target_month": "2026-05"
+    }
+  ],
+  "models": [
+    "lightgbm",
+    "sgdfnet",
+    "rt916",
+    "timemixer",
+    "timesfm"
+  ],
+  "tasks": [
+    "dayahead",
+    "realtime"
+  ],
+  "expanding": true,
+  "train_min_months": 6
+}

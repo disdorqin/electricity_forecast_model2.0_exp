@@ -143,10 +143,15 @@ def set_seed(seed: int = 42) -> None:
 def read_csv_safely(path: str) -> pd.DataFrame:
     for enc in ["gbk", "utf-8-sig", "utf-8"]:
         try:
-            return pd.read_csv(path, encoding=enc)
-        except UnicodeDecodeError:
+            return pd.read_csv(path, encoding=enc, low_memory=False)
+        except (UnicodeDecodeError, pd.errors.ParserError):
             continue
-    return pd.read_csv(path)
+    # 最终回退：Python 引擎对不规则 CSV 容忍度更高
+    try:
+        return pd.read_csv(path, engine="python")
+    except Exception:
+        # 终极回退：自动检测编码
+        return pd.read_csv(path, engine="python", encoding_errors="replace")
 
 
 def load_data(data_path: str) -> pd.DataFrame:

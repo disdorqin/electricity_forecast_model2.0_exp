@@ -248,4 +248,8 @@ def _load_raw_data(data_path: str) -> pd.DataFrame:
     path = str(data_path)
     if path.endswith(".xlsx") or path.endswith(".xls"):
         return pd.read_excel(path)
-    return pd.read_csv(path)
+    # Try UTF-8 first, fall back to GBK for Chinese Windows CSV files
+    try:
+        return pd.read_csv(path)
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="gbk")

@@ -105,12 +105,18 @@ def _should_skip_entire(date_dir: Path, force: bool) -> bool:
     manifest = _load_manifest(date_dir)
     if manifest is None:
         return False
-    if manifest.get("status") != "complete":
+    status = manifest.get("status", "")
+    if status not in ("complete", "complete_with_warnings"):
         return False
     # Check final output files exist and are non-empty
     final_dir = date_dir / "final"
     for f in ["dayahead_final_predictions.csv", "realtime_final_predictions.csv"]:
         if not _file_nonempty(final_dir / f):
+            return False
+    # If classifier was successful, check corrected output too
+    clf_status = manifest.get("steps", {}).get("realtime_classifier", "")
+    if "complete" in str(clf_status):
+        if not _file_nonempty(final_dir / "realtime_final_predictions_corrected.csv"):
             return False
     return True
 
@@ -175,7 +181,7 @@ def _step_oof_pool(args, date_dir: Path, target: str, manifest: dict) -> Path:
         from rolling_oof.contracts import RollingOriginConfig
         from rolling_oof.scheduler import RollingOriginOrchestrator
 
-        models = ALL_FORMAL_MODELS
+        models = FORMAL_MODELS_BY_TASK[target]
         tasks = [target]
 
         config = RollingOriginConfig(
@@ -437,6 +443,13 @@ def _step_fusion(args, date_dir: Path, target: str, manifest: dict) -> Path:
             forecast_df, routing_table, weights_df, output_path=fused_csv,
         )
 
+        # Ensure y_fused column exists (classifier needs it)
+        if "y_pred" in result.columns and "y_fused" not in result.columns:
+            result["y_fused"] = result["y_pred"]
+
+        # Re-save with y_fused included
+        result.to_csv(fused_csv, index=False)
+
         manifest["steps"][f"{target}_fusion"] = "complete"
 
         # Validation
@@ -461,6 +474,9 @@ def _step_fusion(args, date_dir: Path, target: str, manifest: dict) -> Path:
 def _step_classifier(args, date_dir: Path, manifest: dict) -> Path | None:
     """Run negative price classifier on realtime fusion output.
 
+    Creates a compat directory structure that run_classifier_pipeline expects,
+    calls it, then copies results back to canonical locations.
+
     Returns path to corrected CSV, or None if failed/skipped.
     """
     clf_dir = _step_dir(date_dir, "realtime", "05_classifier")
@@ -483,22 +499,51 @@ def _step_classifier(args, date_dir: Path, manifest: dict) -> Path | None:
     try:
         from fusion.classifier_bridge import run_classifier_pipeline
 
+        # Build compat directory structure: compat_fusion/realtime/fused_predictions.csv
+        compat_root = clf_dir / "compat_fusion"
+        compat_rt_dir = compat_root / "realtime"
+        compat_rt_dir.mkdir(parents=True, exist_ok=True)
+        compat_fused = compat_rt_dir / "fused_predictions.csv"
+
+        # Copy fusion output to compat location, ensure y_fused column exists
+        fused_df = pd.read_csv(fused_csv)
+        if "y_pred" in fused_df.columns and "y_fused" not in fused_df.columns:
+            fused_df["y_fused"] = fused_df["y_pred"]
+        fused_df.to_csv(compat_fused, index=False)
+
+        # Resolve project root and classifier data path
+        project_root = Path(__file__).resolve().parents[1]
+        default_clf_data = project_root / "ExtremPriceClf" / "data" / "260525.xlsx"
+        clf_data_path = Path(args.clf_data) if getattr(args, "clf_data", None) else default_clf_data
+
+        date_str = manifest["date"]
         result = run_classifier_pipeline(
-            fused_csv_path=str(fused_csv),
-            realtime_dir=str(date_dir / "realtime"),
-            output_dir=str(clf_dir),
-            clf_data_path=getattr(args, "clf_data", None),
+            fusion_work_dir=compat_root,
+            project_root=project_root,
+            start_date=date_str,
+            end_date=date_str,
+            clf_data_path=clf_data_path,
         )
 
-        if result and result.get("output_path"):
-            output_path = Path(result["output_path"])
-            if output_path.exists() and output_path != corrected_csv:
-                shutil.copy2(output_path, corrected_csv)
-            manifest["steps"]["realtime_classifier"] = "complete"
-            manifest["classifier_corrections"] = result.get("corrected_count", 0)
+        status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
+
+        if status == "completed":
+            # Copy corrected CSV from compat location to canonical locations
+            compat_corrected = compat_rt_dir / "fused_predictions_corrected.csv"
+            if compat_corrected.exists():
+                shutil.copy2(compat_corrected, corrected_csv)
+                manifest["steps"]["realtime_classifier"] = "complete"
+                manifest["classifier_corrections"] = result.get("corrected_hours", 0)
+            else:
+                manifest["steps"]["realtime_classifier"] = "failed: corrected output not found"
+                manifest["warnings"].append("Classifier completed but corrected CSV missing")
+        elif status == "skipped":
+            reason = result.get("reason", "unknown")
+            manifest["steps"]["realtime_classifier"] = f"skipped: {reason}"
+            manifest["warnings"].append(f"Classifier skipped: {reason}")
         else:
-            manifest["steps"]["realtime_classifier"] = "failed: no output"
-            manifest["warnings"].append("Classifier produced no output")
+            manifest["steps"]["realtime_classifier"] = f"failed: {status}"
+            manifest["warnings"].append(f"Classifier failed: {result}")
 
     except Exception as exc:
         logger.warning("Classifier failed (non-fatal): %s", exc)
@@ -578,13 +623,21 @@ def _assemble_final_outputs(args, date_dir: Path, manifest: dict):
             # Add corrected if available
             if _file_nonempty(rt_corr_final):
                 corr_df = pd.read_csv(rt_corr_final)
-                if "y_pred" in corr_df.columns:
-                    corr_df = corr_df.rename(columns={"y_pred": "realtime_pred_corrected"})
+                # Classifier corrected CSV has y_fused_corrected column
+                pred_col = None
+                for c in ["y_fused_corrected", "y_pred"]:
+                    if c in corr_df.columns:
+                        pred_col = c
+                        break
+                if pred_col:
+                    corr_df = corr_df.rename(columns={pred_col: "realtime_pred_corrected"})
                     merge_keys = ["target_day", "ds"]
-                    merged = merged.merge(
-                        corr_df[merge_keys + ["realtime_pred_corrected"]],
-                        on=merge_keys, how="left",
-                    )
+                    available_keys = [k for k in merge_keys if k in corr_df.columns]
+                    if available_keys:
+                        merged = merged.merge(
+                            corr_df[available_keys + ["realtime_pred_corrected"]],
+                            on=available_keys, how="left",
+                        )
 
             merged.to_csv(submission, index=False)
             manifest["final_outputs"]["submission"] = str(submission)
@@ -684,12 +737,41 @@ def run_production_for_date(args, date: str) -> dict:
                 logger.warning("VALIDATION: %s", err)
             manifest["validation_errors"] = errors
 
-        # Mark complete
-        manifest["status"] = "complete"
+            # Classify errors: critical vs non-fatal
+            critical_keywords = [
+                "!=24 rows", "hour_business missing", "null business_day",
+                "negative weights", "Weight sums not", "Missing routing entries",
+                "File not found", "File is empty",
+            ]
+            non_fatal_keywords = [
+                "classifier", "Classifier", "Row count mismatch",
+            ]
+
+            critical_errors = []
+            non_fatal_errors = []
+            for err in errors:
+                if any(kw in err for kw in non_fatal_keywords):
+                    non_fatal_errors.append(err)
+                elif any(kw in err for kw in critical_keywords):
+                    critical_errors.append(err)
+                else:
+                    # Unknown error type → treat as non-fatal
+                    non_fatal_errors.append(err)
+
+            if critical_errors:
+                manifest["status"] = "failed"
+                manifest["critical_errors"] = critical_errors
+            elif non_fatal_errors:
+                manifest["status"] = "complete_with_warnings"
+            else:
+                manifest["status"] = "complete"
+        else:
+            manifest["status"] = "complete"
+
         manifest["finished_at"] = datetime.now().isoformat()
         _write_manifest(date_dir, manifest)
 
-        logger.info("PRODUCTION PIPELINE COMPLETE: %s", date)
+        logger.info("PRODUCTION PIPELINE %s: %s", manifest["status"], date)
         return manifest
 
     finally:

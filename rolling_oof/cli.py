@@ -114,11 +114,15 @@ def print_summary(result: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+# 默认模型列表（与 RollingOriginConfig.models 默认值保持一致）
+_DEFAULT_MODELS = ("lightgbm", "sgdfnet", "rt916", "timemixer", "timesfm")
+
+
 def _resolve_models(args: Namespace) -> list[str]:
     """解析 --models 参数。"""
     raw = getattr(args, "models", "all")
     if raw == "all" or not raw:
-        return list(RollingOriginConfig().models)
+        return list(_DEFAULT_MODELS)
     return [m.strip().lower() for m in raw.split(",")]
 
 

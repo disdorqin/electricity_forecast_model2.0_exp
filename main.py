@@ -69,9 +69,13 @@ def main() -> int:
         print(result)
         return 0
     if args.pipeline == "full":
-        from pipelines.staged_pipeline import run_full_pipeline
-        result = run_full_pipeline(args)
-        print(f"Full pipeline complete: {result['classifier_stage']}")
+        from pipelines.production_pipeline import run_production_pipeline
+        result = run_production_pipeline(args)
+        if isinstance(result, list):
+            for r in result:
+                print(f"  {r.get('date', '?')}: {r.get('status', '?')}")
+        elif isinstance(result, dict):
+            print(f"Production pipeline complete: {result.get('status', 'done')}")
         return 0
     if args.pipeline == "rolling_oof":
         from rolling_oof.cli import run_rolling_oof

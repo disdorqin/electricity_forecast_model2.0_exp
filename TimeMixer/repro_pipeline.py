@@ -2591,9 +2591,9 @@ SEGMENT_DA_TARGETS: dict[str, str] = {
     "17_24": "day_ahead_clearing_price",
 }
 SEGMENT_RT_TARGETS: dict[str, str] = {
-    "1_8": "real_time_clearing_price",
-    "9_16": "real_time_clearing_price",
-    "17_24": "real_time_clearing_price",
+    "1_8": "realtime_price",
+    "9_16": "realtime_price",
+    "17_24": "realtime_price",
 }
 
 
@@ -2732,7 +2732,7 @@ def _train_predict_single_day(
         )
         da_test_past, da_test_future, da_test_y, da_test_baseline = da_test_arrays
 
-        da_pred = predict_model(da_bundle, da_test_past, da_test_future)
+        da_pred = predict_model(da_bundle, da_test_past, da_test_future, device, cfg.batch_size)
         da_pred_df = _predictions_to_dataframe(
             da_pred, da_test_y, da_test_baseline, test_days,
             start_idx, end_idx, "dayahead", segment_name,
@@ -2741,8 +2741,9 @@ def _train_predict_single_day(
 
     # 训练 RT 三个段
     for segment_name, start_idx, end_idx in SEGMENTS:
+        rt_target_col = SEGMENT_RT_TARGETS[segment_name]
         rt_train_arrays = build_segment_arrays(
-            df, train_days, "real_time_clearing_price", cfg.seq_len,
+            df, train_days, rt_target_col, cfg.seq_len,
             cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
         )
         rt_train_past, rt_train_future, rt_train_y, _ = rt_train_arrays
@@ -2753,12 +2754,12 @@ def _train_predict_single_day(
         )
 
         rt_test_arrays = build_segment_arrays(
-            df, test_days, "real_time_clearing_price", cfg.seq_len,
+            df, test_days, rt_target_col, cfg.seq_len,
             cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
         )
         rt_test_past, rt_test_future, rt_test_y, rt_test_baseline = rt_test_arrays
 
-        rt_pred = predict_model(rt_bundle, rt_test_past, rt_test_future)
+        rt_pred = predict_model(rt_bundle, rt_test_past, rt_test_future, device, cfg.batch_size)
         rt_pred_df = _predictions_to_dataframe(
             rt_pred, rt_test_y, rt_test_baseline, test_days,
             start_idx, end_idx, "realtime", segment_name,
@@ -2780,22 +2781,27 @@ def _predictions_to_dataframe(
     task: str,
     segment_name: str,
 ) -> pd.DataFrame:
-    """将模型预测数组转换为 DataFrame。"""
+    """将模型预测数组转换为 DataFrame。
+
+    y_pred / y_true 的 shape 均为 [n_days, segment_len] (segment_len = end_idx - start_idx)。
+    SEGMENTS 为半开区间，hours 对应物理小时索引 (0-indexed)。
+    ds: 01:00 代表第 1 个商业小时, ..., 00:00 代表第 24 个商业小时。
+    """
     n_days = len(test_days)
+    segment_len = end_idx - start_idx
     rows: list[dict] = []
     for day_i in range(n_days):
         target_day = test_days[day_i]
-        hours = list(range(start_idx, end_idx + 1))
-        for j, hour in enumerate(hours):
-            pred_idx = day_i * len(hours) + j
+        for j in range(segment_len):
+            hour_physical = start_idx + j
             rows.append({
                 "target_day": pd.Timestamp(target_day).strftime("%Y-%m-%d"),
-                "ds": pd.Timestamp(target_day) + pd.Timedelta(hours=hour + 1),
-                "hour_business": hour + 1,
+                "ds": pd.Timestamp(target_day) + pd.Timedelta(hours=hour_physical + 1),
+                "hour_business": hour_physical + 1,
                 "period": segment_name,
                 "task": task,
-                "y_pred": float(y_pred[pred_idx]) if pred_idx < len(y_pred) else None,
-                "y_true": float(y_true[pred_idx]) if pred_idx < len(y_true) else None,
+                "y_pred": float(y_pred[day_i, j]) if day_i < y_pred.shape[0] and j < y_pred.shape[1] else None,
+                "y_true": float(y_true[day_i, j]) if day_i < y_true.shape[0] and j < y_true.shape[1] else None,
                 "model_name": "timemixer",
             })
     return pd.DataFrame(rows)

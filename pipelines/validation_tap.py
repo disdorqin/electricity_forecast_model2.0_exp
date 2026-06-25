@@ -172,8 +172,8 @@ def run_validation_tap(
         "training_months": TRAINING_WINDOW_MONTHS,
         "val_ratio": 0.2,
         "seed": 42,
-        "timemixer_rolling_mode": "block",
-        "timemixer_block_days": TAP_BLOCK_DAYS,  # 3 — one train per fold
+        "rolling_mode": "block",
+        "block_days": TAP_BLOCK_DAYS,  # 3 — one train per fold
     }
     if extra_kwargs:
         kwargs.update(extra_kwargs)

@@ -172,8 +172,8 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
         "training_months": 6,
         "val_ratio": 0.2,
         "seed": 42,
-        "timemixer_rolling_mode": "block",
-        "timemixer_block_days": 1,
+        "rolling_mode": "block",
+        "block_days": 1,
     }
 
     for model_name in models:

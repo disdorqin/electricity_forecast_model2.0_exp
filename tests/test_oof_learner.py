@@ -365,5 +365,145 @@ def test_apply_learner_24_rows():
     )
 
 
+# Test 11: meta-validation uses TRUE fitted weights, not equal_weight proxy
+def test_meta_validation_uses_true_weights():
+    """Prove that eval stage uses static_convex true weights, not equal_weight proxy.
+
+    Design: model_a is good (small noise), model_b is bad (large bias).
+    static_convex will learn to give model_a ~0.8+ weight on fit months.
+    equal_weight gives 0.5/0.5 which is much worse.
+    We verify the eval_metric for static_convex matches its TRUE weights,
+    NOT the equal_weight proxy.
+    """
+    np.random.seed(42)
+    n_days_per_month = 15
+    models = ("model_a", "model_b")
+    tasks = ("dayahead",)
+    periods = ("1_8",)
+
+    # Build 5 months of data (Aug-Dec)
+    rows = []
+    base_date = pd.Timestamp("2026-08-01")
+    total_days = n_days_per_month * 5  # 75 days
+
+    for day_offset in range(total_days):
+        target_day = base_date + pd.Timedelta(days=day_offset)
+        for hour in range(1, 25):
+            ds = target_day + pd.Timedelta(hours=hour - 1)
+            if hour == 24:
+                ds = target_day + pd.Timedelta(hours=23)
+            y_true = 200.0 + 30.0 * np.sin(hour / 24 * 2 * np.pi)
+
+            # model_a: small noise (good)
+            y_pred_a = y_true + np.random.randn() * 5.0
+            # model_b: large systematic bias (bad)
+            y_pred_b = y_true + 40.0 + np.random.randn() * 10.0
+
+            for model, y_pred in [("model_a", y_pred_a), ("model_b", y_pred_b)]:
+                rows.append({
+                    "task": "dayahead",
+                    "model_name": model,
+                    "fold_id": 0,
+                    "train_start": "2025-01-01",
+                    "train_end": "2026-07-31",
+                    "test_start": target_day.strftime("%Y-%m-%d"),
+                    "test_end": target_day.strftime("%Y-%m-%d"),
+                    "target_day": target_day.strftime("%Y-%m-%d"),
+                    "business_day": target_day.strftime("%Y-%m-%d"),
+                    "ds": ds.strftime("%Y-%m-%d %H:%M:%S"),
+                    "period": "1_8",
+                    "hour_business": hour,
+                    "y_true": y_true,
+                    "y_pred": y_pred,
+                    "source": "synthetic",
+                    "run_mode": "test",
+                    "created_at": pd.Timestamp.now().isoformat(),
+                })
+
+    oof_df = pd.DataFrame(rows)
+
+    # Run ROEL with last_block_holdout
+    output = run_roel_bgew_fallback(oof_df, coverage_threshold=0.5)
+
+    # --- Verify candidate_metrics has required columns ---
+    cm = output.candidate_metrics
+    assert "fit_metric" in cm.columns, "candidate_metrics missing fit_metric"
+    assert "eval_metric" in cm.columns, "candidate_metrics missing eval_metric"
+    assert "selected_by" in cm.columns, "candidate_metrics missing selected_by"
+    assert "final_refit_metric" in cm.columns, "candidate_metrics missing final_refit_metric"
+
+    # All entries should be selected_by=eval_holdout (we have 5 months)
+    assert all(cm["selected_by"] == "eval_holdout")
+
+    # --- Verify static_convex eval_metric uses TRUE weights ---
+    sc_row = cm[cm["candidate_name"] == "static_convex"]
+    eq_row = cm[cm["candidate_name"] == "equal_weight"]
+    assert len(sc_row) > 0, "static_convex not in candidate_metrics"
+    assert len(eq_row) > 0, "equal_weight not in candidate_metrics"
+
+    sc_eval_metric = sc_row.iloc[0]["eval_metric"]
+    eq_eval_metric = eq_row.iloc[0]["eval_metric"]
+
+    # static_convex should be significantly better (lower) than equal_weight
+    assert sc_eval_metric < eq_eval_metric, (
+        f"static_convex eval_metric ({sc_eval_metric:.4f}) should be < "
+        f"equal_weight eval_metric ({eq_eval_metric:.4f})"
+    )
+
+    # --- Manually verify: compute static_convex eval metric from its TRUE fit weights ---
+    from fusion.learners.candidate_selector import fit_all_candidates, _evaluate_candidate
+
+    # Reproduce the fit on the same fit months (Aug-Nov, i.e. first 4 months)
+    sub = oof_df[(oof_df["task"] == "dayahead") & (oof_df["period"] == "1_8")]
+    months = sorted(sub["target_day"].apply(lambda x: x[:7]).unique())
+    fit_months = months[:-1]
+    eval_months = months[-1:]
+    fit_mask = sub["target_day"].apply(lambda x: x[:7]).isin(fit_months)
+    eval_mask = sub["target_day"].apply(lambda x: x[:7]).isin(eval_months)
+    fit_df = sub[fit_mask]
+    eval_df = sub[eval_mask]
+
+    fitted = fit_all_candidates(fit_df, "dayahead", "1_8", ["model_a", "model_b"])
+    sc_fit = [f for f in fitted if f[0] == "static_convex"][0]
+    sc_true_weights = sc_fit[3]  # The true fitted weights
+
+    # Verify static_convex gives model_a dominant weight (not 50/50)
+    assert sc_true_weights["model_a"] > 0.7, (
+        f"static_convex should give model_a >0.7 weight, got {sc_true_weights['model_a']:.3f}"
+    )
+
+    # Manually compute eval metric with TRUE weights
+    manual_eval_score, _ = _evaluate_candidate(
+        eval_df, "dayahead", "1_8", sc_true_weights, metric_name="sMAPE_floor50"
+    )
+
+    # The eval_metric in candidate_metrics must match the manual computation
+    assert abs(sc_eval_metric - manual_eval_score) < 1e-6, (
+        f"static_convex eval_metric ({sc_eval_metric:.6f}) != "
+        f"manual eval with true weights ({manual_eval_score:.6f}). "
+        f"Eval is NOT using true fitted weights!"
+    )
+
+    # Also verify it does NOT match equal_weight eval
+    eq_weights = {"model_a": 0.5, "model_b": 0.5}
+    eq_manual_score, _ = _evaluate_candidate(
+        eval_df, "dayahead", "1_8", eq_weights, metric_name="sMAPE_floor50"
+    )
+    assert abs(sc_eval_metric - eq_manual_score) > 0.1, (
+        f"static_convex eval_metric ({sc_eval_metric:.6f}) matches equal_weight "
+        f"({eq_manual_score:.6f}). Eval is using equal_weight proxy!"
+    )
+
+    # --- Verify routing selected static_convex ---
+    route = output.routing_table.iloc[0]
+    assert route["selected_mode"] == "static_convex", (
+        f"Expected static_convex to be selected, got {route['selected_mode']}"
+    )
+
+    # Verify final_refit_metric exists in routing
+    assert "final_refit_metric" in route.index
+    assert pd.notna(route["final_refit_metric"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

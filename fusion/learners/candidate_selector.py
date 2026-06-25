@@ -97,6 +97,49 @@ def _evaluate_candidate(
     return metric_value, full_metrics
 
 
+def fit_all_candidates(
+    oof_df: pd.DataFrame,
+    task: str,
+    period: str,
+    eligible_models: list[str],
+    *,
+    metric_name: str = "sMAPE_floor50",
+    tau: float = 30.0,
+    eta: float = 0.5,
+) -> list[tuple[str, str, str | None, dict[str, float], float]]:
+    """Fit all candidate strategies on a dataset and return their weights.
+
+    Returns
+    -------
+    list of (candidate_name, selected_mode, selected_model, weights, fit_metric)
+    """
+    fitted = []
+
+    # 1. Equal weight
+    if len(eligible_models) > 0:
+        w_equal = {m: 1.0 / len(eligible_models) for m in eligible_models}
+        score, _ = _evaluate_candidate(oof_df, task, period, w_equal, metric_name=metric_name)
+        fitted.append(("equal_weight", "equal_weight", None, w_equal, score))
+
+    # 2. Static convex
+    if len(eligible_models) > 1:
+        sc_result = fit_static_convex(oof_df, task, period, eligible_models, metric_name=metric_name)
+        fitted.append(("static_convex", "static_convex", None, sc_result.weights, sc_result.metric_value))
+
+    # 3. BGEW
+    if len(eligible_models) > 1:
+        bgew_result = fit_bgew(oof_df, task, period, eligible_models, metric_name=metric_name, tau=tau, eta=eta)
+        fitted.append(("bgew", "bgew", None, bgew_result.weights, bgew_result.metric_value))
+
+    # 4. Single models (one-hot)
+    for model in eligible_models:
+        w_single = {m: 1.0 if m == model else 0.0 for m in eligible_models}
+        score, _ = _evaluate_candidate(oof_df, task, period, w_single, metric_name=metric_name)
+        fitted.append((f"single_{model}", "single_model", model, w_single, score))
+
+    return fitted
+
+
 def select_best_candidate(
     oof_df: pd.DataFrame,
     task: str,
@@ -133,76 +176,29 @@ def select_best_candidate(
     pd.DataFrame
         Candidate metrics table with full metrics.
     """
+    fitted = fit_all_candidates(
+        oof_df, task, period, eligible_models,
+        metric_name=metric_name, tau=tau, eta=eta,
+    )
+
+    if not fitted:
+        raise ValueError(f"No candidates available for task={task}, period={period}")
+
+    # Build CandidateResult objects
     candidates = []
-
-    # 1. Equal weight
-    if len(eligible_models) > 0:
-        w_equal = {m: 1.0 / len(eligible_models) for m in eligible_models}
-        score_equal, metrics_equal = _evaluate_candidate(
-            oof_df, task, period, w_equal, metric_name=metric_name
-        )
+    for cand_name, sel_mode, sel_model, weights, fit_metric in fitted:
+        _, full_m = _evaluate_candidate(oof_df, task, period, weights, metric_name=metric_name)
         candidates.append(CandidateResult(
-            candidate_name="equal_weight",
-            selected_mode="equal_weight",
-            selected_model=None,
-            weights=w_equal,
-            metric_value=score_equal,
+            candidate_name=cand_name,
+            selected_mode=sel_mode,
+            selected_model=sel_model,
+            weights=weights,
+            metric_value=fit_metric,
             metric_name=metric_name,
-            full_metrics=metrics_equal,
-        ))
-
-    # 2. Static convex
-    if len(eligible_models) > 1:
-        sc_result = fit_static_convex(oof_df, task, period, eligible_models, metric_name=metric_name)
-        _, metrics_sc = _evaluate_candidate(
-            oof_df, task, period, sc_result.weights, metric_name=metric_name
-        )
-        candidates.append(CandidateResult(
-            candidate_name="static_convex",
-            selected_mode="static_convex",
-            selected_model=None,
-            weights=sc_result.weights,
-            metric_value=sc_result.metric_value,
-            metric_name=metric_name,
-            full_metrics=metrics_sc,
-        ))
-
-    # 3. BGEW
-    if len(eligible_models) > 1:
-        bgew_result = fit_bgew(oof_df, task, period, eligible_models, metric_name=metric_name, tau=tau, eta=eta)
-        _, metrics_bgew = _evaluate_candidate(
-            oof_df, task, period, bgew_result.weights, metric_name=metric_name
-        )
-        candidates.append(CandidateResult(
-            candidate_name="bgew",
-            selected_mode="bgew",
-            selected_model=None,
-            weights=bgew_result.weights,
-            metric_value=bgew_result.metric_value,
-            metric_name=metric_name,
-            full_metrics=metrics_bgew,
-        ))
-
-    # 4. Single models (one-hot)
-    for model in eligible_models:
-        w_single = {m: 1.0 if m == model else 0.0 for m in eligible_models}
-        score_single, metrics_single = _evaluate_candidate(
-            oof_df, task, period, w_single, metric_name=metric_name
-        )
-        candidates.append(CandidateResult(
-            candidate_name=f"single_{model}",
-            selected_mode="single_model",
-            selected_model=model,
-            weights=w_single,
-            metric_value=score_single,
-            metric_name=metric_name,
-            full_metrics=metrics_single,
+            full_metrics=full_m,
         ))
 
     # Select best (lowest metric, with simplicity tiebreaker)
-    if not candidates:
-        raise ValueError(f"No candidates available for task={task}, period={period}")
-
     # Simplicity preference: when scores are within 0.1% relative tolerance,
     # prefer simpler strategies.  Rank: single_model=0, equal_weight=1, static_convex=2, bgew=3
     _complexity = {"single_model": 0, "equal_weight": 1, "static_convex": 2, "bgew": 3}
@@ -211,8 +207,6 @@ def select_best_candidate(
     tol = max(abs(best_score) * 1e-3, 1e-9)  # 0.1% relative tolerance
 
     def _sort_key(c):
-        # Group candidates whose score is within tolerance of the best
-        # Among those, prefer simpler strategy (lower complexity rank)
         return (0 if c.metric_value <= best_score + tol else 1, _complexity.get(c.selected_mode, 9))
 
     best = min(candidates, key=_sort_key)

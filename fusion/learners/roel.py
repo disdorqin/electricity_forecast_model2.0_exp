@@ -177,56 +177,69 @@ def run_roel_bgew_fallback(
             fit_df = sub[fit_mask]
             eval_df = sub[eval_mask]
 
-            # Fit candidates on fit_df
-            best_fit, cand_metrics_fit = select_best_candidate(
+            # Step 1: Fit all candidates on fit_df — get TRUE weights per candidate
+            from .candidate_selector import fit_all_candidates, _evaluate_candidate, CandidateResult
+            fitted_fit = fit_all_candidates(
                 fit_df, task, period, eligible,
                 metric_name=metric_name, tau=tau, eta=eta,
             )
 
-            # Evaluate all candidates on eval_df
-            from .candidate_selector import _evaluate_candidate
-            eval_scores = []
-            for _, row in cand_metrics_fit.iterrows():
-                cand_name = row["candidate_name"]
-                sel_mode = row["selected_mode"]
-                sel_model = row["model_name_or_fusion"]
-
-                if sel_mode == "single_model":
-                    w_eval = {m: 1.0 if m == sel_model else 0.0 for m in eligible}
-                elif sel_mode == "equal_weight":
-                    w_eval = {m: 1.0 / len(eligible) for m in eligible}
-                else:
-                    # For fusion candidates, use equal weight as proxy (refit later)
-                    w_eval = {m: 1.0 / len(eligible) for m in eligible}
-
-                score_eval, metrics_eval = _evaluate_candidate(
-                    eval_df, task, period, w_eval, metric_name=metric_name
+            # Step 2: Evaluate each candidate with its TRUE fit_df weights on eval_df
+            eval_results = []
+            for cand_name, sel_mode, sel_model, w_fit, fit_metric in fitted_fit:
+                eval_score, eval_metrics = _evaluate_candidate(
+                    eval_df, task, period, w_fit, metric_name=metric_name,
                 )
-                eval_scores.append((cand_name, sel_mode, sel_model, score_eval, metrics_eval))
+                eval_results.append((cand_name, sel_mode, sel_model, w_fit, fit_metric, eval_score, eval_metrics))
 
-            # Select best based on eval_df
-            best_eval = min(eval_scores, key=lambda x: x[3])
-            best_name, best_mode, best_model, best_score, best_metrics = best_eval
+            # Step 3: Select best candidate based on eval_df metric
+            # Simplicity tiebreaker (same as select_best_candidate)
+            _complexity = {"single_model": 0, "equal_weight": 1, "static_convex": 2, "bgew": 3}
+            best_eval_score = min(r[5] for r in eval_results)
+            tol = max(abs(best_eval_score) * 1e-3, 1e-9)
+
+            def _eval_sort_key(r):
+                return (0 if r[5] <= best_eval_score + tol else 1, _complexity.get(r[1], 9))
+
+            best_eval = min(eval_results, key=_eval_sort_key)
+            best_name, best_mode, best_model, best_w_fit, best_fit_metric, best_eval_metric, best_eval_metrics = best_eval
 
             # Check retention rate
-            retention = best_metrics.get("intersection_retention_rate", 1.0)
+            retention = best_eval_metrics.get("intersection_retention_rate", 1.0)
             if retention < 0.90:
                 warn_msg = f"Low retention for {task}/{period}: {retention:.1%} < 90%"
                 logger.warning(warn_msg)
                 warnings.append(warn_msg)
 
-            # Map back to CandidateResult for refit
-            from .candidate_selector import CandidateResult
+            # Build CandidateResult for refit
             best = CandidateResult(
                 candidate_name=best_name,
                 selected_mode=best_mode,
                 selected_model=best_model if best_mode == "single_model" else None,
-                weights={},  # Will be refit
-                metric_value=best_score,
+                weights={},  # Will be refit on full OOF
+                metric_value=best_eval_metric,
                 metric_name=metric_name,
-                full_metrics=best_metrics,
+                full_metrics=best_eval_metrics,
             )
-            all_candidate_metrics.append(cand_metrics_fit)
+
+            # Step 4: Refit on full OOF for final weights (done below)
+            # Step 5: Build candidate_metrics with fit_metric, eval_metric, selected_by
+            cand_metric_rows = []
+            for cand_name, sel_mode, sel_model, w_fit, fit_metric, eval_score, eval_metrics in eval_results:
+                cand_metric_rows.append({
+                    "task": task,
+                    "period": period,
+                    "candidate_name": cand_name,
+                    "selected_mode": sel_mode,
+                    "model_name_or_fusion": sel_model if sel_model else "fusion",
+                    "fit_metric": fit_metric,
+                    "eval_metric": eval_score,
+                    "sMAPE_floor50": eval_score if metric_name == "sMAPE_floor50" else float("nan"),
+                    "MAE": eval_score if metric_name == "MAE" else float("nan"),
+                    "intersection_retention_rate": eval_metrics.get("intersection_retention_rate", float("nan")),
+                    "selected_by": "eval_holdout",
+                })
+            all_candidate_metrics.append(pd.DataFrame(cand_metric_rows))
         else:
             if len(months) <= 1:
                 warnings.append(f"OOF span too short for {task}/{period}; candidate selection is in-sample")
@@ -235,6 +248,12 @@ def run_roel_bgew_fallback(
                 sub, task, period, eligible,
                 metric_name=metric_name, tau=tau, eta=eta,
             )
+
+            # Add fit_metric/eval_metric/selected_by columns for consistency
+            cand_metrics = cand_metrics.copy()
+            cand_metrics["fit_metric"] = cand_metrics["sMAPE_floor50"] if metric_name == "sMAPE_floor50" else cand_metrics["MAE"]
+            cand_metrics["eval_metric"] = cand_metrics["fit_metric"]  # No holdout, same as fit
+            cand_metrics["selected_by"] = "in_sample"
             all_candidate_metrics.append(cand_metrics)
 
             # Check retention rate
@@ -257,6 +276,12 @@ def run_roel_bgew_fallback(
         else:  # equal_weight
             final_weights = {m: 1.0 / len(eligible) for m in eligible}
 
+        # Compute final_refit_metric: evaluate refitted weights on full OOF
+        from .candidate_selector import _evaluate_candidate
+        final_refit_metric, _ = _evaluate_candidate(
+            oof_df, task, period, final_weights, metric_name=metric_name,
+        )
+
         # Build routing row
         all_routing_rows.append({
             "task": task,
@@ -266,6 +291,7 @@ def run_roel_bgew_fallback(
             "candidate_name": best.candidate_name,
             "metric_name": metric_name,
             "candidate_score": best.metric_value,
+            "final_refit_metric": final_refit_metric,
             "best_fusion_score": best.metric_value if best.selected_mode != "single_model" else float("nan"),
             "best_single_model": best.selected_model if best.selected_mode == "single_model" else float("nan"),
             "best_single_score": best.metric_value if best.selected_mode == "single_model" else float("nan"),
@@ -290,6 +316,20 @@ def run_roel_bgew_fallback(
     weights = pd.DataFrame(all_weights_rows)
     candidate_metrics = pd.concat(all_candidate_metrics, ignore_index=True) if all_candidate_metrics else pd.DataFrame()
     trace = pd.DataFrame(all_trace_rows) if all_trace_rows else pd.DataFrame()
+
+    # Backfill final_refit_metric into candidate_metrics for the winning candidate
+    if not candidate_metrics.empty and not routing_table.empty:
+        refit_map = routing_table.set_index(["task", "period"])["final_refit_metric"].to_dict()
+        candidate_metrics["final_refit_metric"] = float("nan")
+        for idx, row in candidate_metrics.iterrows():
+            key = (row["task"], row["period"])
+            cand = row["candidate_name"]
+            # Only the winning candidate has a final_refit_metric
+            route = routing_table[
+                (routing_table["task"] == key[0]) & (routing_table["period"] == key[1])
+            ]
+            if not route.empty and route.iloc[0]["candidate_name"] == cand:
+                candidate_metrics.at[idx, "final_refit_metric"] = refit_map.get(key, float("nan"))
 
     # Backtest predictions
     backtest_preds = _compute_backtest_predictions(oof_df, routing_table, weights)

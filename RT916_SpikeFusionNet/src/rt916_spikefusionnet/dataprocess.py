@@ -1,4 +1,4 @@
-﻿﻿from chinese_calendar import is_workday, is_holiday
+from chinese_calendar import is_workday, is_holiday
 from borax.calendars import LunarDate
 import pandas as pd
 import datetime

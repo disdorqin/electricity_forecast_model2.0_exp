@@ -124,9 +124,10 @@ def _run_timemixer_fold(
     """
     from TimeMixer.repro_pipeline import RunConfig, run_monthly_reproduction
 
-    # Windows 下多进程 DataLoader 不稳定，强制单 worker
+    # Windows 下多进程 DataLoader 不稳定，降低 worker 数避免崩溃
     import os as _os
-    _os.environ.setdefault("OPTIM_NUM_WORKERS", "0")
+    _os.environ.setdefault("OPTIM_NUM_WORKERS", "2")
+    _os.environ.setdefault("OPTIM_PIN_MEMORY", "0")
 
     # 映射 rolling_mode 到 TimeMixer 的 training_mode
     # "window_once" -> "rolling" (原逻辑)

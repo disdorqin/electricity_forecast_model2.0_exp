@@ -138,6 +138,11 @@ def set_seed(seed: int = 42) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    # Allow non-deterministic ops (e.g. upsample_linear1d_backward) with warning only
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception:
+        pass
 
 
 def read_csv_safely(path: str) -> pd.DataFrame:

@@ -112,12 +112,19 @@ def _step1_validation_tap(args, ddir: Path, target: str, manifest: dict) -> Path
     logger.info("STEP 1: %s validation tap", target)
     date_str = manifest["date"]
 
+    extra_kwargs = {}
+    if getattr(args, "fast_dev_run", False):
+        extra_kwargs["fast_dev_run"] = True
+    if getattr(args, "skip_rt916_validation", False):
+        extra_kwargs["skip_models"] = ["rt916"]
+
     result_path = run_validation_tap(
         predict_date=date_str,
         target=target,
         data_path=args.data_path,
         output_dir=val_dir,
         force=getattr(args, "force", False),
+        extra_kwargs=extra_kwargs if extra_kwargs else None,
     )
 
     if _file_nonempty(result_path):
@@ -153,7 +160,7 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
 
     fs = FoldSpec(
         fold_id=99,
-        train_start=_months_back(D - timedelta(days=1), 12),
+        train_start=_months_back(D - timedelta(days=1), 6),
         train_end=D - timedelta(days=1),
         test_start=D,
         test_end=D,
@@ -162,11 +169,11 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
 
     frames: list[pd.DataFrame] = []
     kwargs = {
-        "training_months": 12,
+        "training_months": 6,
         "val_ratio": 0.2,
         "seed": 42,
-        "timemixer_rolling_mode": "daily",
-        "timemixer_block_days": 7,
+        "timemixer_rolling_mode": "block",
+        "timemixer_block_days": 1,
     }
 
     for model_name in models:
@@ -357,12 +364,16 @@ def _step4_fusion(args, ddir: Path, target: str, manifest: dict) -> Path:
     if "task" in weights_df.columns:
         weights_df = weights_df[weights_df["task"] == target]
 
-    result = _apply_weights(forecast_df, weights_df, target)
+    result, debug_df = _apply_weights(forecast_df, weights_df, target)
 
     if "y_pred" in result.columns and "y_fused" not in result.columns:
         result["y_fused"] = result["y_pred"]
 
     result.to_csv(fused_csv, index=False)
+
+    # Write fused_debug.csv
+    if not debug_df.empty:
+        debug_df.to_csv(fused_dir / "fused_debug.csv", index=False)
 
     if not result.empty:
         day_counts = result.groupby("target_day").size()
@@ -375,8 +386,16 @@ def _step4_fusion(args, ddir: Path, target: str, manifest: dict) -> Path:
 
 
 def _apply_weights(forecast_df, weights_df, target):
-    """Apply fusion weights to forecasts."""
+    """Apply fusion weights to forecasts with per-hour re-normalization.
+
+    For each (ds, hour_business):
+      - Find non-NaN model predictions
+      - Re-normalize their weights
+      - y_fused = sum(w_m * y_pred_m)
+    If all models missing for an hour: raise error.
+    """
     result_frames: list[pd.DataFrame] = []
+    debug_frames: list[pd.DataFrame] = []
 
     for (task, target_day, period), group in forecast_df.groupby(
         ["task", "target_day", "period"]
@@ -391,17 +410,6 @@ def _apply_weights(forecast_df, weights_df, target):
         else:
             w_dict = dict(zip(period_weights["model_name"], period_weights["weight"]))
 
-        available = group["model_name"].unique().tolist()
-        available_w = {m: w_dict.get(m, 0) for m in available if m in w_dict}
-
-        if not available_w:
-            n = len(available)
-            available_w = {m: 1.0 / n for m in available}
-
-        total_w = sum(available_w.values())
-        if total_w > 0:
-            available_w = {m: w / total_w for m, w in available_w.items()}
-
         pivot = group.pivot_table(
             index=["ds", "hour_business", "business_day"],
             columns="model_name",
@@ -409,10 +417,52 @@ def _apply_weights(forecast_df, weights_df, target):
             aggfunc="first",
         )
 
-        y_fused = np.zeros(len(pivot))
-        for m, w in available_w.items():
-            if m in pivot.columns:
-                y_fused += w * pivot[m].fillna(0).values
+        # Per-hour re-normalization
+        y_fused = np.full(len(pivot), np.nan)
+        debug_rows = []
+
+        for idx_pos in range(len(pivot)):
+            row = pivot.iloc[idx_pos]
+            ds_val = pivot.index[idx_pos][0]
+            hb_val = pivot.index[idx_pos][1]
+
+            # Find available (non-NaN) models
+            available = [m for m in row.index if pd.notna(row.get(m, np.nan))]
+            missing = [m for m in w_dict if m not in available]
+
+            if not available:
+                logger.error(
+                    "FUSION ERROR: all models missing for %s/%s ds=%s hour=%s",
+                    task, period, ds_val, hb_val,
+                )
+                raise ValueError(
+                    f"All models missing for {task}/{period} ds={ds_val} hour={hb_val}"
+                )
+
+            # Re-normalize weights for available models
+            avail_w = {m: w_dict.get(m, 0) for m in available if m in w_dict}
+            total_w = sum(avail_w.values())
+            if total_w > 0:
+                avail_w = {m: w / total_w for m, w in avail_w.items()}
+            else:
+                n = len(available)
+                avail_w = {m: 1.0 / n for m in available}
+
+            y_fused[idx_pos] = sum(
+                avail_w.get(m, 0) * row[m] for m in available
+            )
+
+            debug_rows.append({
+                "task": task,
+                "target_day": target_day,
+                "period": period,
+                "ds": ds_val,
+                "hour_business": hb_val,
+                "available_models": str(sorted(available)),
+                "missing_models": str(sorted(missing)),
+                "weight_summary": str({m: round(w, 4) for m, w in avail_w.items()}),
+                "renormalized": len(missing) > 0,
+            })
 
         result = pivot.reset_index()
         result["task"] = task
@@ -420,14 +470,18 @@ def _apply_weights(forecast_df, weights_df, target):
         result["period"] = period
         result["y_pred"] = y_fused
         result["y_fused"] = y_fused
-        result["available_models"] = str(available)
-        result["weight_summary"] = str({m: round(w, 4) for m, w in available_w.items()})
+        result["available_models"] = [r["available_models"] for r in debug_rows]
+        result["weight_summary"] = [r["weight_summary"] for r in debug_rows]
 
         result_frames.append(result)
+        if debug_rows:
+            debug_frames.append(pd.DataFrame(debug_rows))
 
     if result_frames:
-        return pd.concat(result_frames, ignore_index=True)
-    return pd.DataFrame()
+        result_df = pd.concat(result_frames, ignore_index=True)
+        debug_df = pd.concat(debug_frames, ignore_index=True) if debug_frames else pd.DataFrame()
+        return result_df, debug_df
+    return pd.DataFrame(), pd.DataFrame()
 
 
 # ── Step 5: Classifier ───────────────────────────────────────────────
@@ -619,6 +673,7 @@ def run_production_for_date(args, dt: str) -> dict:
     """Run full R3D-Tap-GEF pipeline for a single date."""
     dt = pd.Timestamp(dt).strftime("%Y-%m-%d")
     force = getattr(args, "force", False)
+    fast_dev = getattr(args, "fast_dev_run", False)
 
     ddir = _step0_setup(dt, force)
     if ddir is None:
@@ -633,7 +688,12 @@ def run_production_for_date(args, dt: str) -> dict:
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(file_handler)
 
-    targets = ["dayahead", "realtime"] if getattr(args, "target", "both") == "both" else [args.target]
+    # Fast dev run overrides
+    if fast_dev:
+        targets = ["dayahead"]
+        logger.info("FAST DEV RUN: dayahead only, 1 fold, 1 model, no classifier")
+    else:
+        targets = ["dayahead", "realtime"] if getattr(args, "target", "both") == "both" else [args.target]
 
     manifest = {
         "date": dt,

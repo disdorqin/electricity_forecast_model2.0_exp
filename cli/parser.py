@@ -87,4 +87,20 @@ def build_parser() -> argparse.ArgumentParser:
     r3d_group.add_argument("--weight-floor", type=float, default=0.03, help="Minimum weight for any model (default: 0.03)")
     r3d_group.add_argument("--lambda-refit", type=float, default=0.05, help="Regularization strength for convex refit (default: 0.05)")
 
+    # --- Speed optimization ---
+    speed_group = parser.add_argument_group("Speed Optimization Options")
+    speed_group.add_argument("--enable-amp", action="store_true", default=None, help="Enable AMP mixed precision (auto: true if CUDA available)")
+    speed_group.add_argument("--no-amp", action="store_true", default=False, help="Disable AMP mixed precision")
+    speed_group.add_argument("--amp-dtype", default="fp16", choices=["fp16", "bf16"], help="AMP dtype (default: fp16)")
+    speed_group.add_argument("--enable-compile", action="store_true", default=False, help="Enable torch.compile (off by default)")
+    speed_group.add_argument("--compile-mode", default="default", choices=["default", "reduce-overhead"], help="torch.compile mode")
+    speed_group.add_argument("--num-workers", type=int, default=0, help="DataLoader num_workers (default: 0 on Windows)")
+    speed_group.add_argument("--pin-memory", action="store_true", default=None, help="DataLoader pin_memory (auto: true if CUDA)")
+    speed_group.add_argument("--persistent-workers", action="store_true", default=False, help="DataLoader persistent_workers (only when num_workers > 0)")
+    speed_group.add_argument("--prefetch-factor", type=int, default=2, help="DataLoader prefetch_factor (default: 2)")
+    speed_group.add_argument("--lightgbm-device", default="cpu", choices=["cpu", "gpu", "cuda"], help="LightGBM device (default: cpu)")
+    speed_group.add_argument("--lightgbm-num-threads", default="auto", help="LightGBM num_threads (auto = physical CPU cores)")
+    speed_group.add_argument("--fast-dev-run", action="store_true", default=False, help="Fast dev run: dayahead only, 1 fold, 1 model, no classifier")
+    speed_group.add_argument("--skip-rt916-validation", action="store_true", default=False, help="Skip RT916 in validation tap (temp speedup)")
+
     return parser

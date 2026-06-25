@@ -142,7 +142,23 @@ def run_validation_tap(
         return tap_table_path
 
     fold_specs = generate_tap_fold_specs(predict_date)
-    models = FORMAL_MODELS_BY_TASK[target]
+    models = list(FORMAL_MODELS_BY_TASK[target])
+
+    # Handle extra_kwargs for dev mode and model skipping
+    fast_dev = False
+    skip_models = []
+    if extra_kwargs:
+        fast_dev = extra_kwargs.pop("fast_dev_run", False)
+        skip_models = extra_kwargs.pop("skip_models", [])
+
+    if fast_dev:
+        fold_specs = fold_specs[-1:]  # only fold 9 (most recent)
+        models = models[:1]  # only first model (lightgbm)
+        logger.info("FAST DEV: %d fold, %d models: %s", len(fold_specs), len(models), models)
+
+    if skip_models:
+        models = [m for m in models if m not in skip_models]
+        logger.info("Skipping models %s, remaining: %s", skip_models, models)
 
     all_frames: list[pd.DataFrame] = []
     fold_results: list[dict] = []
@@ -156,8 +172,8 @@ def run_validation_tap(
         "training_months": TRAINING_WINDOW_MONTHS,
         "val_ratio": 0.2,
         "seed": 42,
-        "timemixer_rolling_mode": "daily",
-        "timemixer_block_days": 7,
+        "timemixer_rolling_mode": "block",
+        "timemixer_block_days": TAP_BLOCK_DAYS,  # 3 — one train per fold
     }
     if extra_kwargs:
         kwargs.update(extra_kwargs)

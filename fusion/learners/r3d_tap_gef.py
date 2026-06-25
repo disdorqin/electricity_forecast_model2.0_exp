@@ -116,66 +116,68 @@ def _run_bgew_update(
         age_block = int(fold_data["age_block"].iloc[0])
         recency_gate = float(np.exp(-age_block / tau_block))
 
-        # Process each horizon_day in the fold
-        for horizon_day in sorted(fold_data["horizon_day"].unique()):
-            hday_data = fold_data[fold_data["horizon_day"] == horizon_day]
-            horizon_gate = float(np.exp(-(horizon_day - 1) / tau_horizon))
-            sample_gate = recency_gate * horizon_gate
+        # Compute per-sample sample_gate = recency_gate * horizon_gate
+        fold_data = fold_data.copy()
+        fold_data["_horizon_gate"] = fold_data["horizon_day"].apply(
+            lambda h: float(np.exp(-(h - 1) / tau_horizon))
+        )
+        fold_data["_sample_gate"] = recency_gate * fold_data["_horizon_gate"]
 
-            # Get y_true (same for all models, take from first available)
-            truth = hday_data.drop_duplicates(subset=["ds"])[["ds", "y_true"]]
-            y_true = truth["y_true"].values.astype(float)
-            ds_vals = truth["ds"].values
+        # Get y_true (same for all models, take from first available per ds)
+        truth = fold_data.drop_duplicates(subset=["ds"])[["ds", "y_true"]]
+        y_true = truth["y_true"].values.astype(float)
+        ds_vals = truth["ds"].values
+        gate_vals = fold_data.drop_duplicates(subset=["ds"]).set_index("ds")["_sample_gate"].reindex(ds_vals).values.astype(float)
 
-            # Compute per-model weighted loss
-            model_losses: dict[str, float] = {}
-            for m in models:
-                m_data = hday_data[hday_data["model_name"] == m]
-                if m_data.empty:
-                    continue
-                # Align by ds
-                m_aligned = m_data.set_index("ds").reindex(ds_vals)
-                y_pred_m = m_aligned["y_pred"].values.astype(float)
-                gate_arr = np.full(len(y_true), sample_gate)
-
-                loss = _weighted_smape_floor50(y_true, y_pred_m, gate_arr)
-                if np.isfinite(loss):
-                    model_losses[m] = loss
-
-            if len(model_losses) < 2:
-                # Not enough models to update
+        # Compute per-model weighted loss across ALL samples in this fold
+        model_losses: dict[str, float] = {}
+        for m in models:
+            m_data = fold_data[fold_data["model_name"] == m]
+            if m_data.empty:
                 continue
+            m_aligned = m_data.set_index("ds").reindex(ds_vals)
+            y_pred_m = m_aligned["y_pred"].values.astype(float)
 
-            # Normalize losses by median
-            loss_values = list(model_losses.values())
-            median_loss = float(np.median(loss_values))
-            if median_loss < 1e-6:
-                median_loss = 1e-6
+            loss = _weighted_smape_floor50(y_true, y_pred_m, gate_vals)
+            if np.isfinite(loss):
+                model_losses[m] = loss
 
-            for m in model_losses:
-                norm_loss = model_losses[m] / median_loss
-                norm_loss = np.clip(norm_loss, 0.25, 4.0)
+        if len(model_losses) < 2:
+            # Not enough models to update
+            continue
 
-                # BGEW update
-                old_w = weights[m]
-                weights[m] = old_w * np.exp(-eta * recency_gate * norm_loss)
-                weights[m] = max(weights[m], weight_floor)
+        # Normalize losses by median
+        loss_values = list(model_losses.values())
+        median_loss = float(np.median(loss_values))
+        if median_loss < 1e-6:
+            median_loss = 1e-6
 
-                trace_rows.append({
-                    "task": task,
-                    "period": period,
-                    "tap_fold_id": fold_id,
-                    "age_block": age_block,
-                    "recency_gate": recency_gate,
-                    "horizon_gate_mean": horizon_gate,
-                    "model_name": m,
-                    "weight_before": old_w,
-                    "loss": model_losses[m],
-                    "normalized_loss": norm_loss,
-                    "weight_after": weights[m],  # before renormalization
-                })
+        mean_gate = float(np.mean(gate_vals))
 
-        # Renormalize after processing all horizons in this fold
+        for m in model_losses:
+            norm_loss = model_losses[m] / median_loss
+            norm_loss = np.clip(norm_loss, 0.25, 4.0)
+
+            # BGEW update: use mean_gate as the effective gate for this fold
+            old_w = weights[m]
+            weights[m] = old_w * np.exp(-eta * mean_gate * norm_loss)
+            weights[m] = max(weights[m], weight_floor)
+
+            trace_rows.append({
+                "task": task,
+                "period": period,
+                "tap_fold_id": fold_id,
+                "age_block": age_block,
+                "recency_gate": recency_gate,
+                "horizon_gate_mean": mean_gate,
+                "model_name": m,
+                "weight_before": old_w,
+                "loss": model_losses[m],
+                "normalized_loss": norm_loss,
+                "weight_after": weights[m],  # before renormalization
+            })
+
+        # Renormalize after this fold
         total = sum(weights.values())
         if total > 0:
             weights = {m: w / total for m, w in weights.items()}

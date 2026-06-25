@@ -127,9 +127,10 @@ def _run_timemixer_fold(
     print(f"[DEBUG {fold_spec.fold_id}] Import successful, setting env vars...", flush=True)
 
     # Windows 下多进程 DataLoader 不稳定，强制单进程 (0)
+    # 注意：必须用直接赋值，不能用 setdefault（setdefault 不会覆盖已有值）
     import os as _os
-    _os.environ.setdefault("OPTIM_NUM_WORKERS", "0")
-    _os.environ.setdefault("OPTIM_PIN_MEMORY", "0")
+    _os.environ["OPTIM_NUM_WORKERS"] = "0"
+    _os.environ["OPTIM_PIN_MEMORY"] = "0"
 
     # 映射 rolling_mode 到 TimeMixer 的 training_mode
     # "window_once" -> "rolling" (原逻辑)

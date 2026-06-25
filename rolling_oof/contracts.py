@@ -45,8 +45,10 @@ PERIOD_MAP: dict[range, str] = {
 }
 
 
-def assign_period(hour_business: int) -> str:
+def assign_period(hour_business) -> str:
     """为商业小时(1-24)分配时段标签。"""
+    if pd.isna(hour_business):
+        return "unknown"
     for rng, label in PERIOD_MAP.items():
         if hour_business in rng:
             return label
@@ -412,11 +414,11 @@ def normalize_long_table(
         ds_series = pd.to_datetime(result["ds"])
         # hour_business: 00:00 -> 24, else actual hour
         result["hour_business"] = ds_series.apply(
-            lambda t: 24 if t.hour == 0 else t.hour
-        ).astype(int)
+            lambda t: 24 if pd.notna(t) and t.hour == 0 else (t.hour if pd.notna(t) else pd.NA)
+        ).astype("Int64")  # nullable int to tolerate NaN from missing ds
         # business_day: 00:00 归属前一天
         result["business_day"] = ds_series.apply(
-            lambda t: (t - pd.Timedelta(days=1) if t.hour == 0 else t).strftime("%Y-%m-%d")
+            lambda t: (t - pd.Timedelta(days=1) if pd.notna(t) and t.hour == 0 else t).strftime("%Y-%m-%d") if pd.notna(t) else None
         )
         # period: 1_8 / 9_16 / 17_24
         result["period"] = result["hour_business"].apply(assign_period)

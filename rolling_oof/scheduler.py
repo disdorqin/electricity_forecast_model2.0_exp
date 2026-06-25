@@ -293,18 +293,8 @@ class RollingOriginOrchestrator:
         for result in fold_results:
             if not result.success or result.predictions_df is None:
                 continue
+            # Phase A 已 normalize，直接使用
             df = result.predictions_df.copy()
-            # 标准化
-            df = normalize_long_table(
-                df,
-                task=result.task,
-                model_name=result.model_name,
-                fold_id=result.fold_id,
-                train_start=result.fold_spec.train_start.isoformat(),
-                train_end=result.fold_spec.train_end.isoformat(),
-                test_start=result.fold_spec.test_start.isoformat(),
-                test_end=result.fold_spec.test_end.isoformat(),
-            )
             all_frames.append(df)
 
         if not all_frames:

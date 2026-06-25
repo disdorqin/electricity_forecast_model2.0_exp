@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", default=None, help="Single target day, YYYY-MM-DD")
     parser.add_argument("--start", default=None, help="Range start, YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="Range end, YYYY-MM-DD")
-    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.xlsx")
+    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.csv")
     parser.add_argument("--output-root", default="outputs/unified_runs")
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)

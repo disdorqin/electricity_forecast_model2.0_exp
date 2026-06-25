@@ -75,9 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     learner_group.add_argument("--learner-mode", default="roel_bgew_fallback", help="Learner mode (default: roel_bgew_fallback)")
     learner_group.add_argument("--metric", default="sMAPE_floor50", choices=["sMAPE_floor50", "MAE"], help="Optimization metric")
     learner_group.add_argument("--tau", type=float, default=30.0, help="BGEW time constant (days)")
-    learner_group.add_argument("--eta", type=float, default=0.5, help="BGEW learning rate")
+    learner_group.add_argument("--eta", type=float, default=0.8, help="BGEW / R3D-Tap-GEF learning rate (default: 0.8)")
     learner_group.add_argument("--coverage-threshold", type=float, default=0.95, help="Minimum coverage for model eligibility")
     learner_group.add_argument("--forecast-path", default=None, help="Path to forecast long-table for apply_oof_learner")
     learner_group.add_argument("--learner-artifact", default=None, help="Path to learner artifact directory")
+
+    # --- R3D-Tap-GEF parameters ---
+    r3d_group = parser.add_argument_group("R3D-Tap-GEF Options")
+    r3d_group.add_argument("--tau-block", type=float, default=3.0, help="Recency gate decay for fold age (default: 3.0)")
+    r3d_group.add_argument("--tau-horizon", type=float, default=2.0, help="Horizon gate decay for prediction day offset (default: 2.0)")
+    r3d_group.add_argument("--weight-floor", type=float, default=0.03, help="Minimum weight for any model (default: 0.03)")
+    r3d_group.add_argument("--lambda-refit", type=float, default=0.05, help="Regularization strength for convex refit (default: 0.05)")
 
     return parser

@@ -123,9 +123,25 @@ def main() -> int:
         result = run_production_pipeline(args)
         if isinstance(result, list):
             for r in result:
-                print(f"  {r.get('date', '?')}: {r.get('status', '?')}")
+                status = r.get("status", "?")
+                dt = r.get("date", "?")
+                warnings = r.get("warnings", [])
+                line = f"  {dt}: {status}"
+                if warnings:
+                    line += f" ({len(warnings)} warnings)"
+                print(line)
         elif isinstance(result, dict):
-            print(f"Production pipeline complete: {result.get('status', 'done')}")
+            status = result.get("status", "done")
+            dt = result.get("date", "?")
+            warnings = result.get("warnings", [])
+            final = result.get("final_outputs", {})
+            print(f"R3D-Tap-GEF {dt}: {status}")
+            if warnings:
+                for w in warnings[:5]:
+                    print(f"  ⚠ {w}")
+            if final:
+                for key, path in final.items():
+                    print(f"  {key}: {path}")
         return 0
     if args.pipeline == "rolling_oof":
         from rolling_oof.cli import run_rolling_oof

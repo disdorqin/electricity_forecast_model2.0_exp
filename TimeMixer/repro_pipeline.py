@@ -2632,6 +2632,7 @@ def _run_daily_walk_forward(
         cutoff_hour_da=cfg.cutoff_hour_da, cutoff_hour_rt=cfg.cutoff_hour_rt,
         da_target_mode="direct", rt_target_mode="direct", inference_mode=True,
     )
+    print(f"[DEBUG] _run_daily_walk_forward: test_days count={len(test_days)}", flush=True)
 
     da_target_mode = resolve_task_target_mode(cfg, "da")
     rt_target_mode = resolve_task_target_mode(cfg, "rt")
@@ -2639,6 +2640,7 @@ def _run_daily_walk_forward(
     all_da_preds: list[pd.DataFrame] = []
     all_rt_preds: list[pd.DataFrame] = []
 
+    print(f"[DEBUG] _run_daily_walk_forward: starting loop over {len(test_days)} test_days...", flush=True)
     for target_day in test_days:
         target_day_dt = pd.Timestamp(target_day)
         # 训练窗口截止到 D-1 15:00
@@ -2651,6 +2653,7 @@ def _run_daily_walk_forward(
             continue
         train_days_w, valid_days_w = split_train_valid(train_days, cfg.val_ratio)
         test_days_w = [target_day]
+        print(f"[DEBUG] About to call _train_predict_single_day for {target_day}...", flush=True)
 
         try:
             day_da, day_rt = _train_predict_single_day(

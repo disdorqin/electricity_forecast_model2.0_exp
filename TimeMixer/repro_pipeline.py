@@ -2733,6 +2733,7 @@ def _train_predict_single_day(
 
     返回 (da_predictions, rt_predictions) 两个 DataFrame。
     """
+    print(f"[DEBUG] _train_predict_single_day started, train_days={len(train_days)}, valid_days={len(valid_days)}, test_days={len(test_days)}...", flush=True)
     da_preds_list: list[pd.DataFrame] = []
     rt_preds_list: list[pd.DataFrame] = []
 
@@ -2748,6 +2749,13 @@ def _train_predict_single_day(
             da_train_past, da_train_future, da_train_y, cfg, device,
             task="da", segment_name=segment_name,
         )
+
+        print(f"[DEBUG] About to train DA segment {segment_name}...", flush=True)
+        da_bundle = train_model(
+            da_train_past, da_train_future, da_train_y, cfg, device,
+            task="da", segment_name=segment_name,
+        )
+        print(f"[DEBUG] DA segment {segment_name} training done...", flush=True)
 
         da_test_arrays = build_segment_arrays(
             df, test_days, "day_ahead_clearing_price", cfg.seq_len,

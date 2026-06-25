@@ -1425,6 +1425,7 @@ def train_model(
         _dl_kwargs["prefetch_factor"] = _prefetch
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=train_shuffle, **_dl_kwargs)
     valid_loader = DataLoader(valid_ds, batch_size=cfg.batch_size, shuffle=False, **_dl_kwargs)
+    print(f"[DEBUG] train_model: DataLoaders created, num_workers={_num_workers}", flush=True)
 
     segment_head_mode = "none"
     backbone_name = cfg.backbone
@@ -1448,6 +1449,7 @@ def train_model(
         segment_head_mode=segment_head_mode,
         attn_mask_916=cfg.rt_916_attn_mask_916,
     ).to(device)
+    print(f"[DEBUG] train_model: Model created, task={task}, segment={segment_name}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=cfg.lr * 0.01)
     best_state = None
@@ -1569,8 +1571,11 @@ def train_model(
     _amp_dtype = torch.bfloat16 if _os.getenv("OPTIM_AMP_DTYPE", "bf16").lower() == "bf16" else torch.float16
     _scaler = torch.amp.GradScaler("cuda") if (_use_amp and _amp_dtype == torch.float16) else None
     _non_blocking = _use_cuda and _os.getenv("OPTIM_NON_BLOCKING", "1") == "1"
+    print(f"[DEBUG] train_model: About to start training loop, epochs={cfg.epochs}, device={device}", flush=True)
 
     for epoch in range(1, cfg.epochs + 1):
+        if epoch == 1:
+            print(f"[DEBUG] train_model: Training loop started, epoch 1/{cfg.epochs}", flush=True)
         # === v21 boost_weight 衰减 ===
         if cfg.epochs > cfg.rt_916_boost_warmup_epochs:
             decay_step = max(0, epoch - cfg.rt_916_boost_warmup_epochs)

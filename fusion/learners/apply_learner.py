@@ -15,6 +15,21 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _compute_business_day(ds) -> str | None:
+    """Compute business_day from ds timestamp.
+
+    Rule: if hour == 0, business_day = ds - 1 day; else business_day = ds.date.
+    """
+    if ds is None or (isinstance(ds, float) and np.isnan(ds)):
+        return None
+    ts = pd.Timestamp(ds)
+    if pd.isna(ts):
+        return None
+    if ts.hour == 0:
+        return (ts - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    return ts.strftime("%Y-%m-%d")
+
+
 def apply_learner_to_forecast(
     forecast_df: pd.DataFrame,
     routing_table: pd.DataFrame,
@@ -72,11 +87,14 @@ def apply_learner_to_forecast(
             if selected_model in available_models:
                 model_rows = grp[grp["model_name"] == selected_model]
                 for _, row in model_rows.iterrows():
+                    bd = row.get("business_day")
+                    if bd is None or (isinstance(bd, float) and np.isnan(bd)):
+                        bd = _compute_business_day(row["ds"])
                     rows.append({
                         "task": task,
                         "target_day": target_day,
                         "ds": row["ds"],
-                        "business_day": row.get("business_day"),
+                        "business_day": bd,
                         "hour_business": row["hour_business"],
                         "period": period,
                         "y_pred": row["y_pred"],
@@ -107,7 +125,7 @@ def apply_learner_to_forecast(
                         "task": task,
                         "target_day": target_day,
                         "ds": idx[0],
-                        "business_day": None,
+                        "business_day": _compute_business_day(idx[0]),
                         "hour_business": idx[1],
                         "period": period,
                         "y_pred": y_pred,
@@ -147,7 +165,7 @@ def apply_learner_to_forecast(
                     "task": task,
                     "target_day": target_day,
                     "ds": idx[0],
-                    "business_day": None,
+                    "business_day": _compute_business_day(idx[0]),
                     "hour_business": idx[1],
                     "period": period,
                     "y_pred": y_pred,

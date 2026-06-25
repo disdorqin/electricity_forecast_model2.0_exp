@@ -9,12 +9,12 @@ Compares:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
-from .metrics import compute_all_metrics
+from .metrics import compute_all_metrics, smape_floor50, mae
 from .static_convex import fit_static_convex
 from .bgew import fit_bgew
 
@@ -29,6 +29,7 @@ class CandidateResult:
     weights: dict[str, float]
     metric_value: float
     metric_name: str
+    full_metrics: dict = field(default_factory=dict)
 
 
 def _evaluate_candidate(
@@ -38,9 +39,20 @@ def _evaluate_candidate(
     weights: dict[str, float],
     *,
     metric_name: str = "sMAPE_floor50",
-) -> float:
-    """Evaluate a candidate weight vector on OOF data."""
+) -> tuple[float, dict]:
+    """Evaluate a candidate weight vector on OOF data.
+
+    Returns
+    -------
+    metric_value : float
+        The optimization metric value.
+    full_metrics : dict
+        Complete metrics suite including intersection_retention_rate.
+    """
     sub = oof_df[(oof_df["task"] == task) & (oof_df["period"] == period)].copy()
+
+    # Track retention
+    original_rows = len(sub.drop_duplicates(subset=["target_day", "ds", "hour_business"]))
 
     # Pivot to wide
     wide = sub.pivot_table(
@@ -52,9 +64,10 @@ def _evaluate_candidate(
 
     available = [m for m in weights.keys() if m in wide.columns and weights[m] > 0]
     if not available:
-        return float("inf")
+        return float("inf"), {}
 
-    wide = wide[available].dropna()
+    intersection_rows = len(wide.dropna())
+    wide = wide.dropna()
 
     truth = sub.drop_duplicates(subset=["target_day", "ds", "hour_business"])[
         ["target_day", "ds", "hour_business", "y_true"]
@@ -63,7 +76,7 @@ def _evaluate_candidate(
     wide = wide.join(truth, how="inner")
 
     if wide.empty:
-        return float("inf")
+        return float("inf"), {}
 
     y_true = wide["y_true"].values.astype(float)
     y_pred = np.zeros(len(y_true))
@@ -71,9 +84,17 @@ def _evaluate_candidate(
         if m in wide.columns and w > 0:
             y_pred += w * wide[m].values.astype(float)
 
-    from .metrics import smape_floor50, mae
     metric_fn = smape_floor50 if metric_name == "sMAPE_floor50" else mae
-    return metric_fn(y_true, y_pred)
+    metric_value = metric_fn(y_true, y_pred)
+
+    full_metrics = compute_all_metrics(y_true, y_pred)
+    full_metrics["intersection_retention_rate"] = (
+        intersection_rows / original_rows if original_rows > 0 else 0.0
+    )
+    full_metrics["original_rows"] = original_rows
+    full_metrics["intersection_rows"] = intersection_rows
+
+    return metric_value, full_metrics
 
 
 def select_best_candidate(
@@ -110,14 +131,16 @@ def select_best_candidate(
     CandidateResult
         Best candidate.
     pd.DataFrame
-        Candidate metrics table.
+        Candidate metrics table with full metrics.
     """
     candidates = []
 
     # 1. Equal weight
     if len(eligible_models) > 0:
         w_equal = {m: 1.0 / len(eligible_models) for m in eligible_models}
-        score_equal = _evaluate_candidate(oof_df, task, period, w_equal, metric_name=metric_name)
+        score_equal, metrics_equal = _evaluate_candidate(
+            oof_df, task, period, w_equal, metric_name=metric_name
+        )
         candidates.append(CandidateResult(
             candidate_name="equal_weight",
             selected_mode="equal_weight",
@@ -125,11 +148,15 @@ def select_best_candidate(
             weights=w_equal,
             metric_value=score_equal,
             metric_name=metric_name,
+            full_metrics=metrics_equal,
         ))
 
     # 2. Static convex
     if len(eligible_models) > 1:
         sc_result = fit_static_convex(oof_df, task, period, eligible_models, metric_name=metric_name)
+        _, metrics_sc = _evaluate_candidate(
+            oof_df, task, period, sc_result.weights, metric_name=metric_name
+        )
         candidates.append(CandidateResult(
             candidate_name="static_convex",
             selected_mode="static_convex",
@@ -137,11 +164,15 @@ def select_best_candidate(
             weights=sc_result.weights,
             metric_value=sc_result.metric_value,
             metric_name=metric_name,
+            full_metrics=metrics_sc,
         ))
 
     # 3. BGEW
     if len(eligible_models) > 1:
         bgew_result = fit_bgew(oof_df, task, period, eligible_models, metric_name=metric_name, tau=tau, eta=eta)
+        _, metrics_bgew = _evaluate_candidate(
+            oof_df, task, period, bgew_result.weights, metric_name=metric_name
+        )
         candidates.append(CandidateResult(
             candidate_name="bgew",
             selected_mode="bgew",
@@ -149,12 +180,15 @@ def select_best_candidate(
             weights=bgew_result.weights,
             metric_value=bgew_result.metric_value,
             metric_name=metric_name,
+            full_metrics=metrics_bgew,
         ))
 
     # 4. Single models (one-hot)
     for model in eligible_models:
         w_single = {m: 1.0 if m == model else 0.0 for m in eligible_models}
-        score_single = _evaluate_candidate(oof_df, task, period, w_single, metric_name=metric_name)
+        score_single, metrics_single = _evaluate_candidate(
+            oof_df, task, period, w_single, metric_name=metric_name
+        )
         candidates.append(CandidateResult(
             candidate_name=f"single_{model}",
             selected_mode="single_model",
@@ -162,31 +196,48 @@ def select_best_candidate(
             weights=w_single,
             metric_value=score_single,
             metric_name=metric_name,
+            full_metrics=metrics_single,
         ))
 
-    # Select best (lowest metric)
+    # Select best (lowest metric, with simplicity tiebreaker)
     if not candidates:
         raise ValueError(f"No candidates available for task={task}, period={period}")
 
-    best = min(candidates, key=lambda c: c.metric_value)
+    # Simplicity preference: when scores are within 0.1% relative tolerance,
+    # prefer simpler strategies.  Rank: single_model=0, equal_weight=1, static_convex=2, bgew=3
+    _complexity = {"single_model": 0, "equal_weight": 1, "static_convex": 2, "bgew": 3}
 
-    # Build candidate metrics table
+    best_score = min(c.metric_value for c in candidates)
+    tol = max(abs(best_score) * 1e-3, 1e-9)  # 0.1% relative tolerance
+
+    def _sort_key(c):
+        # Group candidates whose score is within tolerance of the best
+        # Among those, prefer simpler strategy (lower complexity rank)
+        return (0 if c.metric_value <= best_score + tol else 1, _complexity.get(c.selected_mode, 9))
+
+    best = min(candidates, key=_sort_key)
+
+    # Build candidate metrics table with full metrics
     rows = []
     for c in candidates:
+        fm = c.full_metrics
         rows.append({
             "task": task,
             "period": period,
             "candidate_name": c.candidate_name,
             "selected_mode": c.selected_mode,
             "model_name_or_fusion": c.selected_model if c.selected_model else "fusion",
-            "n": len(oof_df[(oof_df["task"] == task) & (oof_df["period"] == period)]),
-            "MAE": c.metric_value if c.metric_name == "MAE" else float("nan"),
-            "RMSE": float("nan"),
-            "sMAPE_floor50": c.metric_value if c.metric_name == "sMAPE_floor50" else float("nan"),
-            "bias_mean": float("nan"),
-            "bias_median": float("nan"),
-            "q90_high_price_MAE": float("nan"),
-            "q95_high_price_MAE": float("nan"),
+            "n": fm.get("n", 0),
+            "MAE": fm.get("MAE", float("nan")),
+            "RMSE": fm.get("RMSE", float("nan")),
+            "sMAPE_floor50": fm.get("sMAPE_floor50", float("nan")),
+            "bias_mean": fm.get("bias_mean", float("nan")),
+            "bias_median": fm.get("bias_median", float("nan")),
+            "q90_high_price_MAE": fm.get("q90_high_price_MAE", float("nan")),
+            "q95_high_price_MAE": fm.get("q95_high_price_MAE", float("nan")),
+            "intersection_retention_rate": fm.get("intersection_retention_rate", float("nan")),
+            "original_rows": fm.get("original_rows", 0),
+            "intersection_rows": fm.get("intersection_rows", 0),
         })
 
     candidate_metrics_df = pd.DataFrame(rows)

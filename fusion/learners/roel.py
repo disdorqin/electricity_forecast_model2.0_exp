@@ -168,7 +168,7 @@ def run_roel_bgew_fallback(
         sub = oof_df[(oof_df["task"] == task) & (oof_df["period"] == period)]
         months = sorted(sub["target_day"].apply(lambda x: x[:7]).unique())
 
-        # Meta-validation: split into fit/eval months
+        # Meta-validation: fit on fit_df, evaluate on eval_df, select best
         if meta_eval_scheme == "last_block_holdout" and len(months) > 1:
             fit_months = months[:-1]
             eval_months = months[-1:]
@@ -176,18 +176,73 @@ def run_roel_bgew_fallback(
             eval_mask = sub["target_day"].apply(lambda x: x[:7]).isin(eval_months)
             fit_df = sub[fit_mask]
             eval_df = sub[eval_mask]
+
+            # Fit candidates on fit_df
+            best_fit, cand_metrics_fit = select_best_candidate(
+                fit_df, task, period, eligible,
+                metric_name=metric_name, tau=tau, eta=eta,
+            )
+
+            # Evaluate all candidates on eval_df
+            from .candidate_selector import _evaluate_candidate
+            eval_scores = []
+            for _, row in cand_metrics_fit.iterrows():
+                cand_name = row["candidate_name"]
+                sel_mode = row["selected_mode"]
+                sel_model = row["model_name_or_fusion"]
+
+                if sel_mode == "single_model":
+                    w_eval = {m: 1.0 if m == sel_model else 0.0 for m in eligible}
+                elif sel_mode == "equal_weight":
+                    w_eval = {m: 1.0 / len(eligible) for m in eligible}
+                else:
+                    # For fusion candidates, use equal weight as proxy (refit later)
+                    w_eval = {m: 1.0 / len(eligible) for m in eligible}
+
+                score_eval, metrics_eval = _evaluate_candidate(
+                    eval_df, task, period, w_eval, metric_name=metric_name
+                )
+                eval_scores.append((cand_name, sel_mode, sel_model, score_eval, metrics_eval))
+
+            # Select best based on eval_df
+            best_eval = min(eval_scores, key=lambda x: x[3])
+            best_name, best_mode, best_model, best_score, best_metrics = best_eval
+
+            # Check retention rate
+            retention = best_metrics.get("intersection_retention_rate", 1.0)
+            if retention < 0.90:
+                warn_msg = f"Low retention for {task}/{period}: {retention:.1%} < 90%"
+                logger.warning(warn_msg)
+                warnings.append(warn_msg)
+
+            # Map back to CandidateResult for refit
+            from .candidate_selector import CandidateResult
+            best = CandidateResult(
+                candidate_name=best_name,
+                selected_mode=best_mode,
+                selected_model=best_model if best_mode == "single_model" else None,
+                weights={},  # Will be refit
+                metric_value=best_score,
+                metric_name=metric_name,
+                full_metrics=best_metrics,
+            )
+            all_candidate_metrics.append(cand_metrics_fit)
         else:
             if len(months) <= 1:
                 warnings.append(f"OOF span too short for {task}/{period}; candidate selection is in-sample")
-            fit_df = sub
-            eval_df = sub
+            # Select best candidate on full data
+            best, cand_metrics = select_best_candidate(
+                sub, task, period, eligible,
+                metric_name=metric_name, tau=tau, eta=eta,
+            )
+            all_candidate_metrics.append(cand_metrics)
 
-        # Select best candidate on fit data
-        best, cand_metrics = select_best_candidate(
-            fit_df, task, period, eligible,
-            metric_name=metric_name, tau=tau, eta=eta,
-        )
-        all_candidate_metrics.append(cand_metrics)
+            # Check retention rate
+            retention = best.full_metrics.get("intersection_retention_rate", 1.0)
+            if retention < 0.90:
+                warn_msg = f"Low retention for {task}/{period}: {retention:.1%} < 90%"
+                logger.warning(warn_msg)
+                warnings.append(warn_msg)
 
         # Refit on full OOF data for final weights
         if best.selected_mode == "single_model":

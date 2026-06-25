@@ -257,15 +257,15 @@ def test_bgew_high_loss():
     assert result.weights["model_a"] > result.weights["model_b"]
 
 
-# Test 7: candidate_selector chooses one-hot when single model is best
+# Test 7: candidate_selector MUST choose one-hot when single model is clearly best
 def test_candidate_selector_one_hot():
-    """Test that candidate_selector can select single model (one-hot)."""
-    # Create data where model_a is much better
-    oof_df = create_synthetic_oof_data(n_days=30, models=("model_a", "model_b"), noise_level=5.0)
+    """When one model is clearly better, selector must pick selected_mode == 'single_model'."""
+    np.random.seed(123)
+    oof_df = create_synthetic_oof_data(n_days=60, models=("model_a", "model_b"), noise_level=3.0)
 
-    # Make model_b much worse
+    # Make model_b have a massive systematic bias — far worse than model_a
     mask = oof_df["model_name"] == "model_b"
-    oof_df.loc[mask, "y_pred"] = oof_df.loc[mask, "y_true"] + 50.0
+    oof_df.loc[mask, "y_pred"] = oof_df.loc[mask, "y_true"] + 80.0  # Huge bias
 
     best, metrics = select_best_candidate(
         oof_df,
@@ -274,13 +274,12 @@ def test_candidate_selector_one_hot():
         eligible_models=["model_a", "model_b"],
     )
 
-    # Should select single_model with model_a, or a fusion heavily weighted toward model_a
-    assert best.selected_mode in ["single_model", "static_convex", "bgew", "equal_weight"]
-    if best.selected_mode == "single_model":
-        assert best.selected_model == "model_a"
-    else:
-        # If fusion, model_a should have dominant weight
-        assert best.weights.get("model_a", 0) >= 0.9
+    # Must select single_model with model_a
+    assert best.selected_mode == "single_model", (
+        f"Expected single_model but got {best.selected_mode}; "
+        f"metrics:\n{metrics.to_string()}"
+    )
+    assert best.selected_model == "model_a"
 
 
 # Test 8: candidate_selector chooses fusion when fusion is better
@@ -359,6 +358,11 @@ def test_apply_learner_24_rows():
     # Should have exactly 24 rows per (task, target_day)
     counts = result.groupby(["task", "target_day"]).size()
     assert all(counts == 24)
+
+    # business_day must never be None
+    assert result["business_day"].notna().all(), (
+        f"Found {result['business_day'].isna().sum()} rows with None business_day"
+    )
 
 
 if __name__ == "__main__":

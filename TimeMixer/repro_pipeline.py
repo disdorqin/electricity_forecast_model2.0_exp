@@ -141,17 +141,30 @@ def set_seed(seed: int = 42) -> None:
 
 
 def read_csv_safely(path: str) -> pd.DataFrame:
-    for enc in ["gbk", "utf-8-sig", "utf-8"]:
+    for enc in ["gbk", "gb18030", "utf-8-sig", "utf-8"]:
         try:
-            return pd.read_csv(path, encoding=enc, low_memory=False)
+            return pd.read_csv(path, encoding=enc, low_memory=False, on_bad_lines="skip")
         except (UnicodeDecodeError, pd.errors.ParserError):
             continue
-    # 最终回退：Python 引擎对不规则 CSV 容忍度更高
+    # 最终回退：彻底清理坏字节，Python 引擎
     try:
-        return pd.read_csv(path, engine="python")
+        return pd.read_csv(path, engine="python", encoding_errors="replace", on_bad_lines="skip")
     except Exception:
-        # 终极回退：自动检测编码
-        return pd.read_csv(path, engine="python", encoding_errors="replace")
+        pass
+    # 终极回退：二进制读取后按行解码
+    import io
+    with open(path, "rb") as f:
+        raw = f.read()
+    # 尝试多种编码清理
+    for enc in ["gbk", "gb18030", "utf-8"]:
+        try:
+            text = raw.decode(enc, errors="replace")
+            return pd.read_csv(io.StringIO(text), on_bad_lines="skip")
+        except Exception:
+            continue
+    # 终极兜底：全部 replacement
+    text = raw.decode("utf-8", errors="replace")
+    return pd.read_csv(io.StringIO(text), on_bad_lines="skip")
 
 
 def load_data(data_path: str) -> pd.DataFrame:

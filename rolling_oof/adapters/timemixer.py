@@ -126,9 +126,9 @@ def _run_timemixer_fold(
     from TimeMixer.repro_pipeline import RunConfig, run_monthly_reproduction
     print(f"[DEBUG {fold_spec.fold_id}] Import successful, setting env vars...", flush=True)
 
-    # Windows 下多进程 DataLoader 不稳定，使用最小 worker 数 (1)
+    # Windows 下多进程 DataLoader 不稳定，强制单进程 (0)
     import os as _os
-    _os.environ.setdefault("OPTIM_NUM_WORKERS", "1")
+    _os.environ.setdefault("OPTIM_NUM_WORKERS", "0")
     _os.environ.setdefault("OPTIM_PIN_MEMORY", "0")
 
     # 映射 rolling_mode 到 TimeMixer 的 training_mode

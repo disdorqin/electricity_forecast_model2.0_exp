@@ -122,7 +122,9 @@ def _run_timemixer_fold(
 
     通过构造 RunConfig 调用 run_monthly_reproduction。
     """
+    print(f"[DEBUG {fold_spec.fold_id}] About to import repro_pipeline...", flush=True)
     from TimeMixer.repro_pipeline import RunConfig, run_monthly_reproduction
+    print(f"[DEBUG {fold_spec.fold_id}] Import successful, setting env vars...", flush=True)
 
     # Windows 下多进程 DataLoader 不稳定，使用最小 worker 数 (1)
     import os as _os
@@ -151,7 +153,9 @@ def _run_timemixer_fold(
         train_months=training_months,
     )
 
+    print(f"[DEBUG {fold_spec.fold_id}] About to call run_monthly_reproduction...", flush=True)
     result = run_monthly_reproduction(run_cfg)
+    print(f"[DEBUG {fold_spec.fold_id}] run_monthly_reproduction returned, type={type(result)}", flush=True)
 
     if result is None:
         return None

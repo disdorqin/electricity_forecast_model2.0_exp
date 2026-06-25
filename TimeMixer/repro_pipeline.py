@@ -1897,7 +1897,9 @@ def update_leaderboard(
 
 
 def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
+    print(f"[DEBUG] run_monthly_reproduction started, training_mode={cfg.training_mode}...", flush=True)
     set_seed(cfg.seed)
+    print(f"[DEBUG] set_seed done...", flush=True)
     device = torch.device(
         "cuda" if cfg.device == "auto" and torch.cuda.is_available() else cfg.device
         if cfg.device != "auto"
@@ -1905,13 +1907,18 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
     )
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[DEBUG] About to load data from {cfg.data_path}...", flush=True)
     df = load_data(cfg.data_path)
+    print(f"[DEBUG] load_data done, df shape: {df.shape}...", flush=True)
+    print(f"[DEBUG] About to call audit_protocol...", flush=True)
     findings = audit_protocol(cfg, df)
+    print(f"[DEBUG] audit_protocol done...", flush=True)
 
     test_start, test_end = resolve_test_window(cfg)
 
     # --- 新增：block / daily walk-forward 模式 ---
     if cfg.training_mode == "daily":
+        print(f"[DEBUG] About to call _run_daily_walk_forward...", flush=True)
         return _run_daily_walk_forward(cfg, df, device, findings)
     if cfg.training_mode == "block":
         return _run_block_walk_forward(cfg, df, device, findings)

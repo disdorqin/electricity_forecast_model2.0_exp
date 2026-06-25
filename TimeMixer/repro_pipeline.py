@@ -1371,6 +1371,7 @@ def train_model(
     segment_name: str | None = None,
     hour_ids: np.ndarray | None = None,
 ) -> dict[str, Any]:
+    print(f"[DEBUG] train_model started, task={task}, segment={segment_name}, y.shape={y.shape}...", flush=True)
     n = len(y)
     split = max(1, int(n * (1 - cfg.val_ratio)))
     train_idx = np.arange(0, split)

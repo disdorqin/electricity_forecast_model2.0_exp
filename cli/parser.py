@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
             "classifier_stage",
             "full",
             "rolling_oof",
+            "oof_learner",
+            "apply_oof_learner",
         ],
     )
     parser.add_argument("--target", default="both", choices=["dayahead", "realtime", "both"])
@@ -65,5 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
     rolling_group.add_argument("--timemixer-block-days", type=int, default=7, help="TimeMixer block mode: days per block")
     rolling_group.add_argument("--escort-date", default=None, help="Phase C escort prediction target date")
     rolling_group.add_argument("--skip-oof-audit", action="store_true", help="Skip fold-level audit")
+
+    # --- OOF learner arguments ---
+    learner_group = parser.add_argument_group("OOF Learner Options")
+    learner_group.add_argument("--oof-path", default=None, help="Path to OOF long-table CSV")
+    learner_group.add_argument("--learner-mode", default="roel_bgew_fallback", help="Learner mode (default: roel_bgew_fallback)")
+    learner_group.add_argument("--metric", default="sMAPE_floor50", choices=["sMAPE_floor50", "MAE"], help="Optimization metric")
+    learner_group.add_argument("--tau", type=float, default=30.0, help="BGEW time constant (days)")
+    learner_group.add_argument("--eta", type=float, default=0.5, help="BGEW learning rate")
+    learner_group.add_argument("--coverage-threshold", type=float, default=0.95, help="Minimum coverage for model eligibility")
+    learner_group.add_argument("--forecast-path", default=None, help="Path to forecast long-table for apply_oof_learner")
+    learner_group.add_argument("--learner-artifact", default=None, help="Path to learner artifact directory")
 
     return parser

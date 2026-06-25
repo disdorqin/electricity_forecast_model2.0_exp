@@ -77,6 +77,16 @@ def main() -> int:
         from rolling_oof.cli import run_rolling_oof
         result = run_rolling_oof(args)
         return 0
+    if args.pipeline == "oof_learner":
+        from fusion.experiments.run_oof_learner import run_oof_learner
+        result = run_oof_learner(args)
+        print(f"OOF learner complete. Outputs in: {result.get('output_root', 'learner_runs')}")
+        return 0
+    if args.pipeline == "apply_oof_learner":
+        from fusion.experiments.run_oof_learner import run_apply_oof_learner
+        result = run_apply_oof_learner(args)
+        print(f"Apply complete. Output: {result['output_path']}")
+        return 0
     return 0
 
 

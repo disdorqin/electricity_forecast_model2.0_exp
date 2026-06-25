@@ -60,6 +60,8 @@ class RT916RollingAdapter(BaseRollingAdapter):
             os.environ["SPIKE_TRAIN_START_DATE"] = fold_spec.train_start.isoformat()
             os.environ["SPIKE_TRAIN_END_DATE"] = fold_spec.train_end.isoformat()
             os.environ["SPIKE_RETRAIN_DAILY"] = "1"
+            # Windows 下 CUDA + DataLoader multiprocessing 不稳定，强制单进程
+            os.environ["OPTIM_NUM_WORKERS"] = "0"
 
             result_df = _run_rt916_fold(data_path, fold_spec, task)
             if result_df is None or result_df.empty:
@@ -97,6 +99,7 @@ class RT916RollingAdapter(BaseRollingAdapter):
                 "SPIKE_TRAIN_START_DATE",
                 "SPIKE_TRAIN_END_DATE",
                 "SPIKE_RETRAIN_DAILY",
+                "OPTIM_NUM_WORKERS",
             ):
                 os.environ.pop(key, None)
 

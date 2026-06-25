@@ -423,6 +423,17 @@ def normalize_long_table(
         # period: 1_8 / 9_16 / 17_24
         result["period"] = result["hour_business"].apply(assign_period)
 
+    # 列名自动映射：各模型输出列名各不相同，统一到 long-table 标准名
+    _COLUMN_RENAME_MAP: dict[str, str] = {
+        "y": "y_true",
+        "pred_y": "y_pred",
+        "price": "y_pred",
+        "predictions": "y_pred",
+    }
+    for src, dst in _COLUMN_RENAME_MAP.items():
+        if src in result.columns and dst not in result.columns:
+            result[dst] = result[src]
+
     # 补充缺失列
     for col in LONG_TABLE_COLUMNS:
         if col not in result.columns:

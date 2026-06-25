@@ -70,6 +70,7 @@ class TimeMixerRollingAdapter(BaseRollingAdapter):
                 task=task,
                 rolling_mode=rolling_mode,
                 block_days=block_days,
+                training_months=kwargs.get("training_months", 12),
             )
 
             if result_df is None or result_df.empty:
@@ -115,6 +116,7 @@ def _run_timemixer_fold(
     task: str,
     rolling_mode: str = "daily",
     block_days: int = 7,
+    training_months: int = 12,
 ) -> pd.DataFrame | None:
     """对 TimeMixer 执行单个 fold。
 
@@ -141,8 +143,7 @@ def _run_timemixer_fold(
         test_end_exclusive=(fold_spec.test_end + timedelta(days=1)).isoformat(),
         training_mode=tm_mode,
         block_days=block_days,
-        segment_training=True,
-        segment_count=3,
+        train_months=training_months,
     )
 
     result = run_monthly_reproduction(run_cfg)

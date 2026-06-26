@@ -122,6 +122,57 @@ def validate_final_csv(
     return results
 
 
+def validate_model_completeness(
+    output_dir: Path,
+    target: str,
+    expected_models: list[str],
+) -> list[tuple[bool, str]]:
+    """Validate that all expected models are present in validation tap and real forecast."""
+    results = []
+
+    # Check validation tap
+    tap_csv = output_dir / target / "validation" / "validation_tap_long_table.csv"
+    if tap_csv.exists():
+        df = pd.read_csv(tap_csv)
+        if "model_name" in df.columns:
+            present = set(df["model_name"].unique())
+            for mdl in expected_models:
+                in_tap = mdl in present
+                results.append(_check(in_tap, f"validation tap contains {target}/{mdl}"))
+                if in_tap:
+                    mdl_rows = len(df[df["model_name"] == mdl])
+                    results.append(_check(
+                        mdl_rows >= 600,
+                        f"validation tap {target}/{mdl} has >= 600 rows (got {mdl_rows})"
+                    ))
+        else:
+            results.append(_check(False, f"validation tap missing 'model_name' column"))
+    else:
+        results.append(_check(False, f"validation tap not found for {target}"))
+
+    # Check real forecast
+    forecast_csv = output_dir / target / "real" / "all_model_forecasts_long.csv"
+    if forecast_csv.exists():
+        df = pd.read_csv(forecast_csv)
+        if "model_name" in df.columns:
+            present = set(df["model_name"].unique())
+            for mdl in expected_models:
+                in_fc = mdl in present
+                results.append(_check(in_fc, f"real forecast contains {target}/{mdl}"))
+                if in_fc:
+                    mdl_rows = len(df[df["model_name"] == mdl])
+                    results.append(_check(
+                        mdl_rows >= 24,
+                        f"real forecast {target}/{mdl} has >= 24 rows (got {mdl_rows})"
+                    ))
+        else:
+            results.append(_check(False, f"real forecast missing 'model_name' column"))
+    else:
+        results.append(_check(False, f"real forecast not found for {target}"))
+
+    return results
+
+
 def validate_weights_csv(
     csv_path: Path,
 ) -> list[tuple[bool, str]]:
@@ -224,6 +275,15 @@ def run_all_validations(
         # Validation tap
         tap_csv = target_dir / "validation" / "validation_tap_long_table.csv"
         all_results.extend(validate_tap_long_table(tap_csv, predict_date))
+
+        # Model completeness
+        try:
+            from pipelines.production_pipeline import FORMAL_MODELS_BY_TASK
+            expected = FORMAL_MODELS_BY_TASK.get(target, [])
+            if expected:
+                all_results.extend(validate_model_completeness(output_dir, target, expected))
+        except ImportError:
+            pass
 
         # Final predictions
         final_csv = target_dir / "final" / f"{target}_final_predictions.csv"

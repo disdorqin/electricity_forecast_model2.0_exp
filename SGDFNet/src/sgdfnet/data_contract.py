@@ -52,6 +52,86 @@ ACTUAL_TO_FORECAST_MAP = dict(zip(ACTUAL_COLS, FORECAST_COLS))
 
 REQUIRED_COLUMNS = [TIMESTAMP_COL, DA_COL, RT_COL, *FORECAST_COLS, *ACTUAL_COLS]
 
+# ── Column name aliases ──────────────────────────────────────────────
+# Map common English/alias names -> standard Chinese names used internally
+_COLUMN_ALIASES: dict[str, str] = {
+    # Timestamp
+    "timestamp": TIMESTAMP_COL,
+    "ds": TIMESTAMP_COL,
+    "datetime": TIMESTAMP_COL,
+    "date_time": TIMESTAMP_COL,
+    "time": TIMESTAMP_COL,
+    # DA price
+    "日前统一出清价格": DA_COL,
+    "day_ahead_clearing_price": DA_COL,
+    "dayahead_price": DA_COL,
+    "day_ahead_price": DA_COL,
+    # RT price
+    "实时统一出清价格": RT_COL,
+    "real_time_clearing_price": RT_COL,
+    "realtime_price": RT_COL,
+    "real_time_price": RT_COL,
+    # Forecast columns (English aliases)
+    "local_plant_forecast": "地方电厂总加预测值",
+    "tie_line_forecast": "联络线受电负荷预测值",
+    "wind_forecast": "风电总加预测值",
+    "solar_forecast": "光伏总加预测值",
+    "nuclear_forecast": "核电总加预测值",
+    "self_supply_forecast": "自备机组总加预测值",
+    "test_unit_forecast": "试验机组总加预测值",
+    "dispatched_load_forecast": "直调负荷预测值",
+    "bidding_space_forecast": "竞价空间预测值",
+    "renewable_forecast": "新能源总加预测值",
+    # Actual columns (English aliases)
+    "local_plant_actual": "地方电厂总加实际值",
+    "tie_line_actual": "联络线受电负荷实际值",
+    "wind_actual": "风电总加实际值",
+    "solar_actual": "光伏总加实际值",
+    "nuclear_actual": "核电总加实际值",
+    "self_supply_actual": "自备机组总加实际值",
+    "test_unit_actual": "试验机组总加实际值",
+    "dispatched_load_actual": "直调负荷实际值",
+    "bidding_space_actual": "竞价空间实际值",
+    "renewable_actual": "新能源总加实际值",
+}
+
+
+def load_table(path: str | Path) -> pd.DataFrame:
+    """Unified data loader supporting .csv, .xlsx, .xls with encoding fallback."""
+    path = Path(path)
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        return pd.read_excel(path, engine="openpyxl")
+    if path.suffix.lower() == ".csv":
+        for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported data file format: {path.suffix} ({path})")
+
+
+def normalize_data_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename recognized alias columns to standard Chinese names.
+
+    Columns already using standard Chinese names are left untouched.
+    Unknown columns pass through unchanged.
+    """
+    rename_map: dict[str, str] = {}
+    for col in df.columns:
+        col_lower = col.strip().lower()
+        if col_lower in _COLUMN_ALIASES:
+            standard = _COLUMN_ALIASES[col_lower]
+            if standard not in df.columns:
+                rename_map[col] = standard
+        elif col in _COLUMN_ALIASES:
+            standard = _COLUMN_ALIASES[col]
+            if standard not in df.columns:
+                rename_map[col] = standard
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
 
 @dataclass
 class FeatureConfig:
@@ -75,10 +155,15 @@ def validate_required_columns(df: pd.DataFrame) -> list[str]:
 
 
 def load_dataset(path: str | Path) -> pd.DataFrame:
-    df = pd.read_excel(path)
+    df = load_table(path)
+    df = normalize_data_columns(df)
     missing = validate_required_columns(df)
     if missing:
-        raise ValueError(f"Dataset missing required columns: {missing}")
+        actual_cols = list(df.columns)
+        raise ValueError(
+            f"Dataset missing required columns: {missing}\n"
+            f"Actual columns in file ({len(actual_cols)}): {actual_cols[:30]}"
+        )
     df[TIMESTAMP_COL] = pd.to_datetime(df[TIMESTAMP_COL])
     df = df.sort_values(TIMESTAMP_COL).reset_index(drop=True)
     return df

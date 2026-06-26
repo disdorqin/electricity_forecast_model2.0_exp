@@ -115,7 +115,7 @@ class ModelPipeline(BaseModelPipeline):
             core.RAW_DF_PATH = os.path.abspath(_dp)
 
         # Read raw data and run feature engineering pipeline
-        df_raw = pd.read_excel(core.RAW_DF_PATH)
+        df_raw = core._load_raw_df()
         df_raw = core.process_features(df_raw)
         df_raw = core.feature_engineer_solar_terms(df_raw)
 

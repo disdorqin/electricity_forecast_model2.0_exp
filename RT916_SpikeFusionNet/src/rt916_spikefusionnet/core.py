@@ -56,6 +56,89 @@ PACKAGE_ROOT = PROJECT_ROOT / "RT916_SpikeFusionNet"
 PACKAGE_OUT_ROOT = PROJECT_ROOT / "outputs" / "RT916_SpikeMarketLab" / "model_packages" / "RT916_SpikeFusionNet"
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# ── Unified data loader ──────────────────────────────────────────────
+_RT916_COL_ALIASES: dict[str, str] = {
+    # Timestamp
+    "timestamp": "时刻",
+    "ds": "时刻",
+    "datetime": "时刻",
+    "date_time": "时刻",
+    "time": "时刻",
+    # DA price
+    "日前统一出清价格": "日前电价",
+    "day_ahead_clearing_price": "日前电价",
+    "dayahead_price": "日前电价",
+    "day_ahead_price": "日前电价",
+    # RT price
+    "实时统一出清价格": "实时电价",
+    "real_time_clearing_price": "实时电价",
+    "realtime_price": "实时电价",
+    "real_time_price": "实时电价",
+    # Forecast columns
+    "local_plant_forecast": "地方电厂总加预测值",
+    "tie_line_forecast": "联络线受电负荷预测值",
+    "wind_forecast": "风电总加预测值",
+    "solar_forecast": "光伏总加预测值",
+    "nuclear_forecast": "核电总加预测值",
+    "self_supply_forecast": "自备机组总加预测值",
+    "test_unit_forecast": "试验机组总加预测值",
+    "dispatched_load_forecast": "直调负荷预测值",
+    "bidding_space_forecast": "竞价空间预测值",
+    "renewable_forecast": "新能源总加预测值",
+    # Actual columns
+    "local_plant_actual": "地方电厂总加实际值",
+    "tie_line_actual": "联络线受电负荷实际值",
+    "wind_actual": "风电总加实际值",
+    "solar_actual": "光伏总加实际值",
+    "nuclear_actual": "核电总加实际值",
+    "self_supply_actual": "自备机组总加实际值",
+    "test_unit_actual": "试验机组总加实际值",
+    "dispatched_load_actual": "直调负荷实际值",
+    "bidding_space_actual": "竞价空间实际值",
+    "renewable_actual": "新能源总加实际值",
+}
+
+
+def _normalize_data_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename recognized alias columns to standard Chinese names."""
+    rename_map: dict[str, str] = {}
+    for col in df.columns:
+        col_lower = col.strip().lower()
+        if col_lower in _RT916_COL_ALIASES:
+            standard = _RT916_COL_ALIASES[col_lower]
+            if standard not in df.columns:
+                rename_map[col] = standard
+        elif col in _RT916_COL_ALIASES:
+            standard = _RT916_COL_ALIASES[col]
+            if standard not in df.columns:
+                rename_map[col] = standard
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
+
+def _load_raw_df(path: str | None = None) -> pd.DataFrame:
+    """Unified data loader: CSV (with encoding fallback) or Excel."""
+    fpath = path or RAW_DF_PATH
+    p = Path(fpath)
+    if p.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(p, engine="openpyxl")
+    elif p.suffix.lower() == ".csv":
+        df = None
+        for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+            try:
+                df = pd.read_csv(p, encoding=enc)
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        if df is None:
+            df = pd.read_csv(p)
+    else:
+        raise ValueError(f"Unsupported data file format: {p.suffix} ({p})")
+    df = _normalize_data_columns(df)
+    return df
+
+
 OUTPUT = "实时电价"
 TEST_TOTAL_START_END_LIST = ["2026-02-01 01:00:00", "2026-02-10 00:00:00"]
 
@@ -934,7 +1017,7 @@ def train_interface(target="实时电价", start_end_list=None, mod="all"):
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw_df()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
@@ -959,7 +1042,7 @@ def run(target="实时电价", start_end_list=None, mod="all", asof_ts=None, enf
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw_df()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
@@ -1024,7 +1107,7 @@ def run_daily_asof_backtest(target="实时电价", start_end_list=None, mod="all
     _update_config(target, start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw_df()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col=target)
@@ -1131,7 +1214,7 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     _update_config("实时电价", start_end_list)
     os.makedirs(CONFIG["SAVE_ROOT_DIR"], exist_ok=True)
 
-    df_raw = pd.read_excel(RAW_DF_PATH)
+    df_raw = _load_raw_df()
     df_raw = process_features(df_raw)
     df_raw = feature_engineer_solar_terms(df_raw)
     df_raw = enrich_selected_features(df_raw, target_col="实时电价")
@@ -1469,13 +1552,30 @@ def run_online_walk_forward_rt916(
             _tmp_period_dir = os.path.join(_tmp_save_root, _ts_dir_name)
             os.makedirs(_tmp_save_root, exist_ok=True)
             # 创建符号链接（Windows 可能需要 junction 或 copy）
-            if os.path.exists(_tmp_period_dir):
-                shutil.rmtree(_tmp_period_dir)
+            # Use lexists to catch broken symlinks too
+            if os.path.lexists(_tmp_period_dir):
+                try:
+                    if os.path.islink(_tmp_period_dir):
+                        os.unlink(_tmp_period_dir)
+                    else:
+                        shutil.rmtree(_tmp_period_dir, ignore_errors=True)
+                except Exception:
+                    pass
             try:
                 os.symlink(str(ckpt_root / period_name), _tmp_period_dir, target_is_directory=True)
             except OSError:
                 # Windows fallback: 复制文件
-                shutil.copytree(str(ckpt_root / period_name), _tmp_period_dir)
+                if os.path.lexists(_tmp_period_dir):
+                    try:
+                        shutil.rmtree(_tmp_period_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                try:
+                    shutil.copytree(str(ckpt_root / period_name), _tmp_period_dir)
+                except FileExistsError:
+                    # Last resort: just point SAVE_ROOT_DIR at the checkpoint directly
+                    _tmp_save_root = str(ckpt_root)
+                    _tmp_period_dir = None
 
             CONFIG["SAVE_ROOT_DIR"] = _tmp_save_root
 
@@ -1488,12 +1588,12 @@ def run_online_walk_forward_rt916(
             finally:
                 CONFIG["SAVE_ROOT_DIR"] = _orig_save_root
                 # 清理临时目录
-                if os.path.exists(_tmp_period_dir):
+                if _tmp_period_dir and os.path.lexists(_tmp_period_dir):
                     try:
                         if os.path.islink(_tmp_period_dir):
                             os.unlink(_tmp_period_dir)
                         else:
-                            shutil.rmtree(_tmp_period_dir)
+                            shutil.rmtree(_tmp_period_dir, ignore_errors=True)
                     except Exception:
                         pass
 

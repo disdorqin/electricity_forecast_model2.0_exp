@@ -176,7 +176,7 @@ class RT916RollingAdapter(BaseRollingAdapter):
         cn_target = TARGET_MAP[task]
 
         # 读取数据并做特征工程
-        df_raw = pd.read_excel(data_path)
+        df_raw = core._load_raw_df(data_path)
         df_raw = core.process_features(df_raw)
         df_raw = core.feature_engineer_solar_terms(df_raw)
         df_raw = core.enrich_selected_features(df_raw, target_col=cn_target)
@@ -264,7 +264,7 @@ class RT916RollingAdapter(BaseRollingAdapter):
         cn_target = TARGET_MAP[task]
 
         # 读取数据并做特征工程
-        df_raw = pd.read_excel(data_path)
+        df_raw = core._load_raw_df(data_path)
         df_raw = core.process_features(df_raw)
         df_raw = core.feature_engineer_solar_terms(df_raw)
         df_raw = core.enrich_selected_features(df_raw, target_col=cn_target)

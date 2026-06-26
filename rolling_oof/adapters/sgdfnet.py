@@ -378,7 +378,7 @@ def _annotate_block_columns(
 
     # 检测日期列
     date_col = None
-    for candidate in ("business_day", "target_day", "ds", "timestamp"):
+    for candidate in ("business_day", "target_day", "ds", "timestamp", "时刻", "鏃跺埢"):
         if candidate in result.columns:
             date_col = candidate
             break

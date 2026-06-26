@@ -75,6 +75,102 @@ def _save_manifest(ddir: Path, manifest: dict):
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
 
 
+# ── Hard validation gates ────────────────────────────────────────────
+def _check_model_completeness(
+    csv_path: Path,
+    target: str,
+    expected_models: list[str],
+    *,
+    allow_missing: bool = False,
+    stage: str = "validation",
+) -> tuple[bool, list[str]]:
+    """Check that all expected models are present in a CSV.
+
+    Returns (passed, messages).
+    If not passed and not allow_missing, the caller should fail the pipeline.
+    """
+    messages: list[str] = []
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        msg = f"[{stage}] {target}: file missing or empty: {csv_path}"
+        messages.append(msg)
+        return (False, messages)
+
+    df = pd.read_csv(csv_path)
+    if "model_name" not in df.columns:
+        msg = f"[{stage}] {target}: 'model_name' column not found in {csv_path.name}"
+        messages.append(msg)
+        return (False, messages)
+
+    present = set(df["model_name"].unique())
+    missing = [m for m in expected_models if m not in present]
+
+    if missing:
+        msg = f"[{stage}] {target}: MISSING expected models: {missing} (present: {sorted(present)})"
+        messages.append(msg)
+        if allow_missing:
+            logger.warning(msg + " (--allow-missing-models: continuing)")
+            return (True, messages)
+        else:
+            logger.error(msg + " — pipeline will FAIL (use --allow-missing-models to override)")
+            return (False, messages)
+
+    # Also check per-model row counts
+    min_rows = 600 if stage == "validation" else 20
+    for mdl in expected_models:
+        mdl_count = len(df[df["model_name"] == mdl])
+        if mdl_count < min_rows:
+            msg = f"[{stage}] {target}/{mdl}: only {mdl_count} rows (expected >= {min_rows})"
+            messages.append(msg)
+            if not allow_missing:
+                logger.error(msg + " — pipeline will FAIL")
+                return (False, messages)
+            else:
+                logger.warning(msg + " (--allow-missing-models: continuing)")
+
+    logger.info("[%s] %s: all %d expected models present (%s)", stage, target, len(expected_models), sorted(present))
+    return (True, messages)
+
+
+def _check_ytrue_coverage(
+    csv_path: Path,
+    target: str,
+    *,
+    min_coverage_pct: float = 95.0,
+    allow_low: bool = False,
+) -> tuple[bool, list[str]]:
+    """Check y_true coverage per model in the validation tap table.
+
+    Returns (passed, messages).
+    """
+    messages: list[str] = []
+    if not csv_path.exists():
+        return (True, messages)
+
+    df = pd.read_csv(csv_path)
+    if "y_true" not in df.columns or "model_name" not in df.columns:
+        return (True, messages)
+
+    all_passed = True
+    for mdl in df["model_name"].unique():
+        mdl_df = df[df["model_name"] == mdl]
+        total = len(mdl_df)
+        valid = mdl_df["y_true"].notna().sum()
+        pct = 100.0 * valid / total if total > 0 else 0.0
+
+        if pct < min_coverage_pct:
+            msg = f"[y_true] {target}/{mdl}: coverage {pct:.1f}% ({valid}/{total}) < {min_coverage_pct}%"
+            messages.append(msg)
+            if allow_low:
+                logger.warning(msg + " (--allow-low-ytrue: continuing)")
+            else:
+                logger.error(msg + " — pipeline will FAIL (use --allow-low-ytrue to override)")
+                all_passed = False
+        else:
+            logger.info("[y_true] %s/%s: coverage %.1f%% (%d/%d) OK", target, mdl, pct, valid, total)
+
+    return (all_passed, messages)
+
+
 # ── Step 0: Directory setup ──────────────────────────────────────────
 def _step0_setup(dt: str, force: bool) -> Path | None:
     """Create or check the date directory.
@@ -323,7 +419,7 @@ def _normalize_real_forecast(raw_df, *, task, model_name, date_str):
     df = raw_df.copy()
 
     if "ds" not in df.columns:
-        for col in ["timestamp", "datetime", "time", "date"]:
+        for col in ["timestamp", "datetime", "time", "date", "时刻", "鏃跺埢"]:
             if col in df.columns:
                 df = df.rename(columns={col: "ds"})
                 break
@@ -832,6 +928,10 @@ def run_production_for_date(args, dt: str) -> dict:
         logger.info("R3D-Tap-GEF PRODUCTION: %s", dt)
         logger.info("=" * 60)
 
+        allow_missing_models = getattr(args, "allow_missing_models", False)
+        allow_low_ytrue = getattr(args, "allow_low_ytrue", False)
+        fast_dev = getattr(args, "fast_dev_run", False)
+
         for target in targets:
             logger.info("--- %s ---", target)
 
@@ -845,6 +945,39 @@ def run_production_for_date(args, dt: str) -> dict:
                 _save_manifest(ddir, manifest)
                 return manifest
 
+            # ── Hard gate: model completeness + y_true coverage after validation tap ──
+            if not fast_dev:
+                tap_csv = ddir / target / "validation" / "validation_tap_long_table.csv"
+                expected = FORMAL_MODELS_BY_TASK[target]
+
+                # Check --models filtering: if user specified subset, only check those
+                user_models = getattr(args, "models", None)
+                if user_models and user_models not in ("all", ""):
+                    user_set = set(m.strip() for m in user_models.split(","))
+                    expected = [m for m in expected if m in user_set]
+
+                ok_models, msgs = _check_model_completeness(
+                    tap_csv, target, expected,
+                    allow_missing=allow_missing_models, stage="validation",
+                )
+                if msgs:
+                    manifest.setdefault("gate_messages", []).extend(msgs)
+                if not ok_models:
+                    manifest["status"] = "failed: missing models in validation tap"
+                    _save_manifest(ddir, manifest)
+                    return manifest
+
+                ok_ytrue, msgs_yt = _check_ytrue_coverage(
+                    tap_csv, target,
+                    allow_low=allow_low_ytrue,
+                )
+                if msgs_yt:
+                    manifest.setdefault("gate_messages", []).extend(msgs_yt)
+                if not ok_ytrue:
+                    manifest["status"] = "failed: y_true coverage below 95%"
+                    _save_manifest(ddir, manifest)
+                    return manifest
+
             try:
                 t_step = time.time()
                 _step2_real_forecast(args, ddir, target, manifest)
@@ -854,6 +987,27 @@ def run_production_for_date(args, dt: str) -> dict:
                 manifest["status"] = "failed"
                 _save_manifest(ddir, manifest)
                 return manifest
+
+            # ── Hard gate: model completeness after real forecast ──
+            if not fast_dev:
+                forecast_csv = ddir / target / "real" / "all_model_forecasts_long.csv"
+                expected = FORMAL_MODELS_BY_TASK[target]
+
+                user_models = getattr(args, "models", None)
+                if user_models and user_models not in ("all", ""):
+                    user_set = set(m.strip() for m in user_models.split(","))
+                    expected = [m for m in expected if m in user_set]
+
+                ok_fc, msgs_fc = _check_model_completeness(
+                    forecast_csv, target, expected,
+                    allow_missing=allow_missing_models, stage="forecast",
+                )
+                if msgs_fc:
+                    manifest.setdefault("gate_messages", []).extend(msgs_fc)
+                if not ok_fc:
+                    manifest["status"] = "failed: missing models in real forecast"
+                    _save_manifest(ddir, manifest)
+                    return manifest
 
             try:
                 t_step = time.time()

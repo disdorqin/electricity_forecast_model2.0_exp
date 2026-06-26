@@ -123,7 +123,7 @@ def split_month_predictions_to_learner_folds(
 
     # Ensure ds column exists (normalize from timestamp if needed)
     if "ds" not in df.columns:
-        for col in ("timestamp", "datetime", "time"):
+        for col in ("timestamp", "datetime", "time", "时刻"):
             if col in df.columns:
                 if "ds" in df.columns:
                     df = df.drop(columns=[col])
@@ -625,7 +625,7 @@ def normalize_block_predictions_to_tap(
     df["model_name"] = model_name
 
     if "ds" not in df.columns:
-        for col in ["timestamp", "datetime", "time", "date"]:
+        for col in ["timestamp", "datetime", "time", "date", "时刻"]:
             if col in df.columns:
                 df = df.rename(columns={col: "ds"})
                 break

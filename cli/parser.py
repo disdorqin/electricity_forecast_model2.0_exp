@@ -124,4 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
     speed_group.add_argument("--fast-dev-run", action="store_true", default=False, help="Fast dev run: dayahead only, 1 fold, 1 model, no classifier")
     speed_group.add_argument("--skip-rt916-validation", action="store_true", default=False, help="Skip RT916 in validation tap (temp speedup)")
 
+    # --- Validation gates ---
+    gate_group = parser.add_argument_group("Validation Gate Options")
+    gate_group.add_argument("--allow-missing-models", action="store_true", default=False,
+        help="Allow pipeline to complete with warnings even if expected models are missing")
+    gate_group.add_argument("--allow-low-ytrue", action="store_true", default=False,
+        help="Allow pipeline to continue even if y_true coverage < 95%% for some models")
+
     return parser

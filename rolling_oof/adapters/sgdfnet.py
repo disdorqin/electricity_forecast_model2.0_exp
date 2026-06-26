@@ -78,7 +78,7 @@ class SGDFNetRollingAdapter(BaseRollingAdapter):
                 error_message="SGDFNet only supports realtime task",
             )
 
-        fold_strategy: str = kwargs.get("fold_strategy", "auto")
+        fold_strategy: str = kwargs.get("fold_strategy", "3x10")
         effective_strategy = self._resolve_strategy(fold_strategy, fold_spec)
 
         logger.info(
@@ -353,12 +353,12 @@ def _run_sgdfnet_fold(data_path: str, fold_spec: FoldSpec) -> pd.DataFrame | Non
 
 
 def _annotate_block_columns(
-    df: pd.DataFrame, fold_spec: FoldSpec,
+    df: pd.DataFrame, fold_spec: FoldSpec, predict_date: str = "",
 ) -> pd.DataFrame:
     """为 3x10 fold 的预测结果添加 tap_block_id / age_block / horizon_day。
 
     通过解析每行的日期，计算其属于哪个 3 天 block。
-    Block 划分（D = 目标月第一天）：
+    D = predict_date (预测日), Block 划分：
         Block 0: D-30, D-29, D-28
         Block 1: D-27, D-26, D-25
         ...
@@ -366,12 +366,15 @@ def _annotate_block_columns(
     """
     result = df.copy()
 
-    # 推断 D：从 target_month 解析
-    try:
-        D = pd.Timestamp(fold_spec.target_month + "-01").date()
-    except Exception:
-        # fallback: D = test_end + 1 day (仅对最后一个 fold 准确)
-        D = fold_spec.test_end + timedelta(days=1)
+    # 推断 D：优先使用 predict_date，其次 target_month，最后 fallback
+    if predict_date:
+        D = pd.Timestamp(predict_date).date()
+    else:
+        try:
+            D = pd.Timestamp(fold_spec.target_month + "-01").date()
+        except Exception:
+            # fallback: D = test_end + 1 day (仅对最后一个 fold 准确)
+            D = fold_spec.test_end + timedelta(days=1)
 
     # 检测日期列
     date_col = None

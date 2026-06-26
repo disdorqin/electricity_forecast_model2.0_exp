@@ -119,13 +119,27 @@ def _step1_validation_tap(args, ddir: Path, target: str, manifest: dict) -> Path
     if getattr(args, "skip_rt916_validation", False):
         extra_kwargs["skip_models"] = ["rt916"]
 
+    # --models filtering: compute skip_models for models NOT in the list
+    specified_models = getattr(args, "models", None)
+    if specified_models and specified_models not in (None, "all", ""):
+        model_list = [m.strip() for m in specified_models.split(",") if m.strip()]
+        all_target_models = FORMAL_MODELS_BY_TASK[target]
+        skip = [m for m in all_target_models if m not in model_list]
+        if skip:
+            existing_skip = extra_kwargs.get("skip_models", [])
+            extra_kwargs["skip_models"] = existing_skip + skip
+            logger.info("  --models=%s -> skipping %s for %s", specified_models, skip, target)
+        # Override fast_dev model limitation with explicit --models
+        if extra_kwargs.get("fast_dev_run"):
+            extra_kwargs["fast_dev_target_models"] = model_list
+
     # New: pass online update parameters
     extra_kwargs["timemixer_online_epochs"] = getattr(args, "timemixer_online_epochs", 3)
     extra_kwargs["timemixer_online_lr"] = getattr(args, "timemixer_online_lr", None)
     extra_kwargs["rt916_online_epochs"] = getattr(args, "rt916_online_epochs", 3)
     extra_kwargs["rt916_online_lr"] = getattr(args, "rt916_online_lr", None)
     extra_kwargs["timesfm_inference_mode"] = getattr(args, "timesfm_inference_mode", "daily")
-    extra_kwargs["sgdfnet_fold_strategy"] = getattr(args, "sgdfnet_fold_strategy", "auto")
+    extra_kwargs["sgdfnet_fold_strategy"] = getattr(args, "sgdfnet_fold_strategy", "3x10")
 
     result_path = run_validation_tap(
         predict_date=date_str,
@@ -165,6 +179,24 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
     logger.info("STEP 2: %s real forecast", target)
     date_str = manifest["date"]
     models = FORMAL_MODELS_BY_TASK[target]
+
+    # Fast dev: limit to models that have validation tap data
+    fast_dev = getattr(args, "fast_dev_run", False)
+    if fast_dev:
+        # In fast_dev mode, only forecast with models that participated in validation tap
+        val_dir = ddir / target / "validation"
+        val_folds = val_dir / "folds"
+        available = []
+        for m in models:
+            fold_dir = val_folds / "fold_09" / f"{m}_predictions.csv"
+            if fold_dir.exists():
+                available.append(m)
+        if available:
+            models = available
+            logger.info("  fast_dev: limiting models to %s", models)
+        else:
+            models = ["lightgbm"]  # fallback
+            logger.info("  fast_dev: no validation data, using lightgbm only")
     D = pd.Timestamp(date_str).date()
 
     fs = FoldSpec(
@@ -727,8 +759,13 @@ def run_production_for_date(args, dt: str) -> dict:
 
     # Fast dev run overrides
     if fast_dev:
-        targets = ["dayahead"]
-        logger.info("FAST DEV RUN: dayahead only, 1 fold, 1 model, no classifier")
+        # Respect explicit --target; default to dayahead for fast dev
+        explicit_target = getattr(args, "target", "both")
+        if explicit_target and explicit_target != "both":
+            targets = [explicit_target]
+        else:
+            targets = ["dayahead"]
+        logger.info("FAST DEV RUN: %s only, 1 fold, 1 model, no classifier", targets)
     else:
         targets = ["dayahead", "realtime"] if getattr(args, "target", "both") == "both" else [args.target]
 

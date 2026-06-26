@@ -174,6 +174,121 @@ def _run_da_daily_walk_forward(
     return None
 
 
+# ── 3×10 block 策略：单次训练 + 逐日预测（正确计算滚动特征）──
+def _run_lgbm_10day_block(
+    data_path: str,
+    forecast_start: str,
+    forecast_end: str,
+    train_start: str,
+    train_end: str,
+    target: str = "dayahead",
+    training_months: int = 12,
+    val_ratio: float = 0.2,
+) -> pd.DataFrame | None:
+    """3×10 true rolling: train once at cutoff, predict 10 days individually.
+
+    For each 10-day block:
+      - Train ONE model with history up to train_end (cutoff date)
+      - Predict each day one at a time via predict_range (correct rolling features)
+      - Return combined 10-day predictions
+
+    This avoids the per-day retraining of the old daily_walk_forward,
+    reducing from 30 trainings to 3 per 30-day validation window.
+    """
+    if target == "dayahead":
+        return _run_da_10day_block(
+            data_path, forecast_start, forecast_end,
+            train_start, train_end, training_months, val_ratio,
+        )
+    else:
+        # realtime: the existing pipeline is already per-day walk-forward
+        # For 3×10, we train at cutoff and predict 10 days
+        from lightGBM.main_fix import run_lgbm_pipeline
+        return run_lgbm_pipeline(
+            data_path=data_path,
+            forecast_start=forecast_start,
+            forecast_end=forecast_end,
+            target="实时电价",
+            use_predicted_temp=False,
+            training_months=training_months,
+            val_ratio=val_ratio,
+        )
+
+
+def _run_da_10day_block(
+    data_path: str,
+    forecast_start: str,
+    forecast_end: str,
+    train_start: str,
+    train_end: str,
+    training_months: int = 12,
+    val_ratio: float = 0.2,
+) -> pd.DataFrame | None:
+    """日前电价 3×10 block: train once, predict 10 days individually."""
+    from lightGBM.train_da_fix import LGBMPowerPredictor as LGBMPowerPredictorDA
+    from lightGBM.infer_da_fix import PowerInference as PowerInferenceDA
+    from lightGBM.main_fix import _fit_dayahead_fixed_window
+
+    predictor = LGBMPowerPredictorDA()
+    inference = PowerInferenceDA(model_path=None)
+
+    train_end_dt = pd.to_datetime(train_end)
+    forecast_start_dt = pd.to_datetime(forecast_start)
+    forecast_end_dt = pd.to_datetime(forecast_end)
+    train_start_dt = pd.to_datetime(train_start)
+
+    # Load raw data once for feature engineering context
+    raw_df = predictor.load_and_process_data(data_path)
+
+    # ── Train ONCE at block cutoff ──
+    # Cutoff is train_end + " 14:00" (same convention as per-day)
+    val_end_str = train_end_dt.strftime("%Y-%m-%d 14:00:00")
+    val_start_str = train_start_dt.strftime("%Y-%m-%d 01:00:00")
+
+    best_res = _fit_dayahead_fixed_window(
+        predictor=predictor,
+        data_path=data_path,
+        history_start_date=val_start_str,
+        history_end_date=val_end_str,
+        raw_df=raw_df,
+        val_ratio=val_ratio,
+    )
+    inference.model = best_res["model"]
+
+    # ── Predict each day individually ──
+    all_days_preds: list[pd.DataFrame] = []
+    current_date = forecast_start_dt
+    while current_date <= forecast_end_dt:
+        target_day_str = current_date.strftime("%Y-%m-%d")
+        try:
+            inference_start = current_date.strftime("%Y-%m-%d 01:00:00")
+            inference_end = (current_date + datetime.timedelta(days=1)).strftime(
+                "%Y-%m-%d 00:00:00"
+            )
+            day_result_df = inference.predict_range(
+                data_path, inference_start, inference_end,
+                target="日前电价", raw_df=raw_df,
+            )
+
+            if day_result_df is not None and not day_result_df.empty:
+                day_result_df["target_day"] = target_day_str
+                all_days_preds.append(day_result_df)
+        except Exception as e:
+            logger.error(
+                "[lgbm_10day_block] %s prediction failed: %s",
+                target_day_str, e, exc_info=True,
+            )
+
+        current_date += datetime.timedelta(days=1)
+
+    del best_res
+    gc.collect()
+
+    if all_days_preds:
+        return pd.concat(all_days_preds, axis=0)
+    return None
+
+
 def _run_rt_daily_walk_forward(
     data_path: str,
     forecast_start: str,

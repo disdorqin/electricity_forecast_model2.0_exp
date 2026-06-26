@@ -153,8 +153,14 @@ def run_validation_tap(
 
     if fast_dev:
         fold_specs = fold_specs[-1:]  # only fold 9 (most recent)
-        models = models[:1]  # only first model (lightgbm)
-        logger.info("FAST DEV: %d fold, %d models: %s", len(fold_specs), len(models), models)
+        # If --models specified with fast-dev, use those; else first model
+        fast_dev_models = extra_kwargs.get("fast_dev_target_models", None) if extra_kwargs else None
+        if fast_dev_models:
+            models = [m for m in fast_dev_models if m in models]
+            logger.info("FAST DEV: %d fold, %d models (--models): %s", len(fold_specs), len(models), models)
+        else:
+            models = models[:1]  # only first model (lightgbm)
+            logger.info("FAST DEV: %d fold, %d models: %s", len(fold_specs), len(models), models)
 
     if skip_models:
         models = [m for m in models if m not in skip_models]
@@ -190,6 +196,20 @@ def run_validation_tap(
     )
 
     # ── 1. Online models (timemixer, rt916): walk-forward across all folds ──
+    # Build FoldSpec objects for all folds
+    from rolling_oof.contracts import FoldSpec
+    all_fold_specs = []
+    for fold_info in fold_specs:
+        fs = FoldSpec(
+            fold_id=fold_info["fold_id"],
+            train_start=date.fromisoformat(fold_info["train_start"]),
+            train_end=date.fromisoformat(fold_info["train_end"]),
+            test_start=date.fromisoformat(fold_info["test_start"]),
+            test_end=date.fromisoformat(fold_info["test_end"]),
+            target_month="",
+        )
+        all_fold_specs.append(fs)
+
     for model_name in online_models:
         adapter_cls = ADAPTER_REGISTRY.get(model_name)
         if adapter_cls is None:
@@ -203,76 +223,112 @@ def run_validation_tap(
         checkpoint_dir = output_dir / f"{model_name}_checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("  [online] %s: walk-forward across %d folds", model_name, len(fold_specs))
-
-        for fold_info in fold_specs:
-            fold_id = fold_info["fold_id"]
-            fold_dir = folds_dir / f"fold_{fold_id:02d}"
-            fold_dir.mkdir(exist_ok=True)
-            pred_file = fold_dir / f"{model_name}_predictions.csv"
-
-            # Cache check
-            if not force and _file_nonempty(pred_file):
-                logger.info("    SKIP %s fold %d — cached", model_name, fold_id)
+        # Check cache for all folds
+        all_cached = all(
+            (folds_dir / f"fold_{fi['fold_id']:02d}" / f"{model_name}_predictions.csv").exists()
+            and _file_nonempty(folds_dir / f"fold_{fi['fold_id']:02d}" / f"{model_name}_predictions.csv")
+            for fi in fold_specs
+        )
+        if not force and all_cached:
+            logger.info("  [online] %s: all folds cached, skipping", model_name)
+            for fold_info in fold_specs:
+                fold_id = fold_info["fold_id"]
+                pred_file = folds_dir / f"fold_{fold_id:02d}" / f"{model_name}_predictions.csv"
                 df = pd.read_csv(pred_file)
                 all_frames.append(df)
                 fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "cached"})
+            continue
+
+        logger.info("  [online] %s: base train once + %d block online updates", model_name, len(fold_specs))
+        online_epochs = kwargs.get(f"{model_name}_online_epochs", 3)
+        online_lr = kwargs.get(f"{model_name}_online_lr")
+
+        try:
+            if model_name == "timemixer":
+                # New: buffered online — base train once + 3×10day blocks + seasonal replay
+                from TimeMixer.buffered_online import run_online_month_buffered
+                logger.info("    %s: calling run_online_month_buffered (3x10day + seasonal replay)...", model_name)
+                combined_df = run_online_month_buffered(
+                    task=target,
+                    data_path=data_path,
+                    predict_date=predict_date,
+                    checkpoint_dir=str(checkpoint_dir),
+                    train_months=kwargs.get("training_months", 12),
+                    online_epochs=online_epochs,
+                    online_lr=online_lr,
+                    lambda_seasonal=kwargs.get("lambda_seasonal", 0.3),
+                    lambda_anchor=kwargs.get("lambda_anchor", 1e-4),
+                    replay_buffer_mode=kwargs.get("replay_buffer_mode", "rotating_year"),
+                )
+            elif model_name == "rt916":
+                # New: buffered online — base train once + 3×10day blocks + seasonal replay
+                from rolling_oof.buffered_rt916 import run_rt916_online_month_buffered
+                logger.info("    %s: calling run_rt916_online_month_buffered (3x10day + seasonal replay)...", model_name)
+                combined_df = run_rt916_online_month_buffered(
+                    task=target,
+                    data_path=data_path,
+                    predict_date=predict_date,
+                    checkpoint_dir=str(checkpoint_dir),
+                    train_months=kwargs.get("training_months", 12),
+                    online_epochs=online_epochs,
+                    online_lr=online_lr,
+                    lambda_seasonal=kwargs.get("lambda_seasonal", 0.3),
+                    lambda_anchor=kwargs.get("lambda_anchor", 1e-4),
+                    replay_buffer_mode=kwargs.get("replay_buffer_mode", "rotating_year"),
+                )
+            else:
+                logger.error("    %s: unknown online model", model_name)
                 continue
 
-            from rolling_oof.contracts import FoldSpec
-            fs = FoldSpec(
-                fold_id=fold_id,
-                train_start=date.fromisoformat(fold_info["train_start"]),
-                train_end=date.fromisoformat(fold_info["train_end"]),
-                test_start=date.fromisoformat(fold_info["test_start"]),
-                test_end=date.fromisoformat(fold_info["test_end"]),
-                target_month="",
-            )
+            if combined_df is None or combined_df.empty:
+                logger.error("    %s: batch online returned no data", model_name)
+                fold_results.append({"model_name": model_name, "status": "failed", "error": "No data from batch"})
+                continue
 
-            try:
-                online_kwargs = {
-                    "rolling_mode": "online",
-                    "training_months": kwargs.get("training_months", TRAINING_WINDOW_MONTHS),
-                    "block_days": TAP_BLOCK_DAYS,
-                    "online_epochs": kwargs.get(f"{model_name}_online_epochs", 3),
-                    "online_lr": kwargs.get(f"{model_name}_online_lr"),
-                    "checkpoint_dir": str(checkpoint_dir),
-                }
+            # Split combined_df into per-fold DataFrames and save
+            for fold_info in fold_specs:
+                fold_id = fold_info["fold_id"]
+                fold_dir = folds_dir / f"fold_{fold_id:02d}"
+                fold_dir.mkdir(exist_ok=True)
+                pred_file = fold_dir / f"{model_name}_predictions.csv"
 
-                logger.info("    %s fold %d: online update...", model_name, fold_id)
-                result = adapter.fold_train_predict(
-                    task=target, fold_spec=fs, data_path=data_path,
-                    **online_kwargs,
-                )
-
-                if not result.success:
-                    logger.error("    %s fold %d FAILED: %s", model_name, fold_id, result.error_message)
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "failed", "error": result.error_message})
+                fold_df = _split_fold_predictions(combined_df, fold_info, fold_id)
+                if fold_df.empty:
+                    logger.warning("    %s: no data for fold %d", model_name, fold_id)
                     continue
 
-                if result.predictions_df is None or result.predictions_df.empty:
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "empty"})
-                    continue
-
-                df = _normalize_tap_predictions(
-                    result.predictions_df, task=target, model_name=model_name,
+                fold_df = _normalize_tap_predictions(
+                    fold_df, task=target, model_name=model_name,
                     fold_id=fold_id, fold_info=fold_info,
                     predict_date=predict_date,
                 )
-                df["tap_source"] = "online_update"
-                df["source_confidence"] = 0.95
-                df["checkpoint_path"] = str(checkpoint_dir)
+                fold_df["tap_source"] = "online_update"
+                fold_df["source_confidence"] = 0.95
+                fold_df["checkpoint_path"] = str(checkpoint_dir)
 
-                df.to_csv(pred_file, index=False)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(df)})
-                logger.info("    %s fold %d: %d rows (online)", model_name, fold_id, len(df))
+                fold_df.to_csv(pred_file, index=False)
+                all_frames.append(fold_df)
+                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(fold_df)})
+                logger.info("    %s fold %d: %d rows (online batch)", model_name, fold_id, len(fold_df))
 
-            except Exception as exc:
-                logger.error("    %s fold %d exception: %s", model_name, fold_id, exc)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "exception", "error": str(exc)})
+        except Exception as exc:
+            logger.error("    %s batch online FAILED: %s. Falling back to per-fold.", model_name, exc, exc_info=True)
+            _run_online_per_fold(
+                adapter, model_name, target, fold_specs, all_fold_specs,
+                data_path, output_dir, folds_dir, checkpoint_dir,
+                force, kwargs, all_frames, fold_results,
+            )
 
-    # ── 2. Inference models (timesfm): daily or block inference ──────
+    # ── 2. Inference models (timesfm): 30 daily cutoff inference ─────
+    # Import once at module level for efficiency
+    from pipelines.validation_tap_light_sgdf_timesfm import (
+        run_timesfm_daily_validation_tap,
+        normalize_block_predictions_to_tap,
+        save_per_fold_predictions,
+        save_runtime_report,
+    )
+    all_runtime_rows: list[dict] = []
+
     for model_name in inference_models:
         adapter_cls = ADAPTER_REGISTRY.get(model_name)
         if adapter_cls is None:
@@ -283,146 +339,95 @@ def run_validation_tap(
             logger.info("%s does not support %s", model_name, target)
             continue
 
-        inference_mode = kwargs.get("timesfm_inference_mode", "daily")
-        tap_source_tag = "direct_inference_daily" if inference_mode == "daily" else "direct_inference_block"
-        confidence = 0.90 if inference_mode == "daily" else 0.85
+        logger.info("  [inference] %s: 30 daily cutoff inference", model_name)
 
-        logger.info("  [inference] %s: mode=%s across %d folds", model_name, inference_mode, len(fold_specs))
+        combined_df, runtime_rows = run_timesfm_daily_validation_tap(
+            predict_date=predict_date,
+            target=target,
+            data_path=data_path,
+            output_dir=output_dir,
+            force=force,
+            segment_count=kwargs.get("segment_count", 3),
+            seed=kwargs.get("seed", 42),
+            deterministic=kwargs.get("deterministic", True),
+        )
 
-        for fold_info in fold_specs:
-            fold_id = fold_info["fold_id"]
-            fold_dir = folds_dir / f"fold_{fold_id:02d}"
-            fold_dir.mkdir(exist_ok=True)
-            pred_file = fold_dir / f"{model_name}_predictions.csv"
-
-            if not force and _file_nonempty(pred_file):
-                logger.info("    SKIP %s fold %d — cached", model_name, fold_id)
-                df = pd.read_csv(pred_file)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "cached"})
-                continue
-
-            from rolling_oof.contracts import FoldSpec
-            fs = FoldSpec(
-                fold_id=fold_id,
-                train_start=date.fromisoformat(fold_info["train_start"]),
-                train_end=date.fromisoformat(fold_info["train_end"]),
-                test_start=date.fromisoformat(fold_info["test_start"]),
-                test_end=date.fromisoformat(fold_info["test_end"]),
-                target_month="",
+        if not combined_df.empty:
+            tap_df = normalize_block_predictions_to_tap(
+                combined_df, predict_date=predict_date,
+                task=target, model_name=model_name,
             )
+            save_per_fold_predictions(tap_df, folds_dir, model_name)
+            all_frames.append(tap_df)
 
-            try:
-                logger.info("    %s fold %d: %s inference...", model_name, fold_id, inference_mode)
-                result = adapter.fold_train_predict(
-                    task=target, fold_spec=fs, data_path=data_path,
-                    inference_mode=inference_mode,
-                    training_months=kwargs.get("training_months", TRAINING_WINDOW_MONTHS),
-                )
+            for fold_id in range(TAP_FOLDS):
+                fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
+                fold_results.append({
+                    "fold_id": fold_id, "model_name": model_name,
+                    "status": "complete" if fold_rows > 0 else "empty",
+                    "n_rows": fold_rows,
+                })
+            logger.info("    %s: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+        else:
+            logger.error("    %s: NO predictions generated", model_name)
+            fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
 
-                if not result.success:
-                    logger.error("    %s fold %d FAILED: %s", model_name, fold_id, result.error_message)
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "failed", "error": result.error_message})
-                    continue
+        all_runtime_rows.extend(runtime_rows)
 
-                if result.predictions_df is None or result.predictions_df.empty:
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "empty"})
-                    continue
+    # ── 3. Rolling models (lightgbm): 3x10 true rolling ──────────────
+    from pipelines.validation_tap_light_sgdf_timesfm import (
+        run_lightgbm_3x10_validation_tap,
+    )
 
-                df = _normalize_tap_predictions(
-                    result.predictions_df, task=target, model_name=model_name,
-                    fold_id=fold_id, fold_info=fold_info,
-                    predict_date=predict_date,
-                )
-                df["tap_source"] = tap_source_tag
-                df["source_confidence"] = confidence
+    for model_name in rolling_models:
+        adapter_cls = ADAPTER_REGISTRY.get(model_name)
+        if adapter_cls is None:
+            logger.warning("Unknown model: %s", model_name)
+            continue
+        adapter = adapter_cls()
+        if target not in adapter.supported_tasks:
+            logger.info("%s does not support %s", model_name, target)
+            continue
 
-                df.to_csv(pred_file, index=False)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(df)})
-                logger.info("    %s fold %d: %d rows (inference)", model_name, fold_id, len(df))
+        logger.info("  [rolling] %s: 3x10 true rolling", model_name)
 
-            except Exception as exc:
-                logger.error("    %s fold %d exception: %s", model_name, fold_id, exc)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "exception", "error": str(exc)})
-
-    # ── 3. Rolling models (lightgbm): standard fold-by-fold ──────────
-    for fold_info in fold_specs:
-        fold_id = fold_info["fold_id"]
-        fold_dir = folds_dir / f"fold_{fold_id:02d}"
-        fold_dir.mkdir(exist_ok=True)
-
-        logger.info(
-            "  [rolling] Tap fold %d/10: train %s->%s, test %s->%s",
-            fold_id, fold_info["train_start"], fold_info["train_end"],
-            fold_info["test_start"], fold_info["test_end"],
+        combined_df, runtime_rows = run_lightgbm_3x10_validation_tap(
+            predict_date=predict_date,
+            target=target,
+            data_path=data_path,
+            output_dir=output_dir,
+            force=force,
+            training_months=kwargs.get("training_months", TRAINING_WINDOW_MONTHS),
+            val_ratio=kwargs.get("val_ratio", 0.2),
         )
 
-        from rolling_oof.contracts import FoldSpec
-        fs = FoldSpec(
-            fold_id=fold_id,
-            train_start=date.fromisoformat(fold_info["train_start"]),
-            train_end=date.fromisoformat(fold_info["train_end"]),
-            test_start=date.fromisoformat(fold_info["test_start"]),
-            test_end=date.fromisoformat(fold_info["test_end"]),
-            target_month="",
-        )
+        if not combined_df.empty:
+            tap_df = normalize_block_predictions_to_tap(
+                combined_df, predict_date=predict_date,
+                task=target, model_name=model_name,
+            )
+            save_per_fold_predictions(tap_df, folds_dir, model_name)
+            all_frames.append(tap_df)
 
-        for model_name in rolling_models:
-            pred_file = fold_dir / f"{model_name}_predictions.csv"
+            for fold_id in range(TAP_FOLDS):
+                fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
+                fold_results.append({
+                    "fold_id": fold_id, "model_name": model_name,
+                    "status": "complete" if fold_rows > 0 else "empty",
+                    "n_rows": fold_rows,
+                })
+            logger.info("    %s: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+        else:
+            logger.error("    %s: NO predictions generated", model_name)
+            fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
 
-            if not force and _file_nonempty(pred_file):
-                logger.info("    SKIP %s fold %d — cached", model_name, fold_id)
-                df = pd.read_csv(pred_file)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "cached"})
-                continue
+        all_runtime_rows.extend(runtime_rows)
 
-            logger.info("    %s fold %d: training...", model_name, fold_id)
-            adapter_cls = ADAPTER_REGISTRY.get(model_name)
-            if adapter_cls is None:
-                logger.warning("    Unknown model: %s", model_name)
-                continue
+    # ── 4. SGDFNet models: 3x10 true rolling ─────────────────────────
+    from pipelines.validation_tap_light_sgdf_timesfm import (
+        run_sgdfnet_3x10_validation_tap,
+    )
 
-            adapter = adapter_cls()
-            if target not in adapter.supported_tasks:
-                logger.info("    %s does not support %s", model_name, target)
-                continue
-
-            try:
-                result = adapter.fold_train_predict(
-                    task=target, fold_spec=fs, data_path=data_path,
-                    **kwargs,
-                )
-
-                if not result.success:
-                    logger.error("    %s fold %d FAILED: %s", model_name, fold_id, result.error_message)
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "failed", "error": result.error_message})
-                    continue
-
-                if result.predictions_df is None or result.predictions_df.empty:
-                    logger.warning("    %s fold %d: no predictions", model_name, fold_id)
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "empty"})
-                    continue
-
-                df = _normalize_tap_predictions(
-                    result.predictions_df, task=target, model_name=model_name,
-                    fold_id=fold_id, fold_info=fold_info,
-                    predict_date=predict_date,
-                )
-                df["tap_source"] = "rolling_cutoff"
-                df["source_confidence"] = 1.0
-
-                df.to_csv(pred_file, index=False)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(df)})
-                logger.info("    %s fold %d: %d rows", model_name, fold_id, len(df))
-
-            except Exception as exc:
-                logger.error("    %s fold %d exception: %s", model_name, fold_id, exc)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "exception", "error": str(exc)})
-
-    # ── 4. SGDFNet models: fold strategy from adapter ────────────────
     for model_name in sgdfnet_models:
         adapter_cls = ADAPTER_REGISTRY.get(model_name)
         if adapter_cls is None:
@@ -433,65 +438,43 @@ def run_validation_tap(
             logger.info("%s does not support %s", model_name, target)
             continue
 
-        fold_strategy = kwargs.get("sgdfnet_fold_strategy", "auto")
-        logger.info("  [sgdfnet] %s: strategy=%s across %d folds", model_name, fold_strategy, len(fold_specs))
+        fold_strategy = kwargs.get("sgdfnet_fold_strategy", "3x10")
+        logger.info("  [sgdfnet] %s: 3x10 true rolling, strategy=%s", model_name, fold_strategy)
 
-        for fold_info in fold_specs:
-            fold_id = fold_info["fold_id"]
-            fold_dir = folds_dir / f"fold_{fold_id:02d}"
-            fold_dir.mkdir(exist_ok=True)
-            pred_file = fold_dir / f"{model_name}_predictions.csv"
+        combined_df, runtime_rows = run_sgdfnet_3x10_validation_tap(
+            predict_date=predict_date,
+            target=target,
+            data_path=data_path,
+            output_dir=output_dir,
+            force=force,
+            fold_strategy=fold_strategy,
+        )
 
-            if not force and _file_nonempty(pred_file):
-                logger.info("    SKIP %s fold %d — cached", model_name, fold_id)
-                df = pd.read_csv(pred_file)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "cached"})
-                continue
-
-            from rolling_oof.contracts import FoldSpec
-            fs = FoldSpec(
-                fold_id=fold_id,
-                train_start=date.fromisoformat(fold_info["train_start"]),
-                train_end=date.fromisoformat(fold_info["train_end"]),
-                test_start=date.fromisoformat(fold_info["test_start"]),
-                test_end=date.fromisoformat(fold_info["test_end"]),
-                target_month="",
+        if not combined_df.empty:
+            tap_df = normalize_block_predictions_to_tap(
+                combined_df, predict_date=predict_date,
+                task=target, model_name=model_name,
             )
+            save_per_fold_predictions(tap_df, folds_dir, model_name)
+            all_frames.append(tap_df)
 
-            try:
-                logger.info("    %s fold %d: training (strategy=%s)...", model_name, fold_id, fold_strategy)
-                result = adapter.fold_train_predict(
-                    task=target, fold_spec=fs, data_path=data_path,
-                    fold_strategy=fold_strategy,
-                    training_months=kwargs.get("training_months", TRAINING_WINDOW_MONTHS),
-                )
+            for fold_id in range(TAP_FOLDS):
+                fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
+                fold_results.append({
+                    "fold_id": fold_id, "model_name": model_name,
+                    "status": "complete" if fold_rows > 0 else "empty",
+                    "n_rows": fold_rows,
+                })
+            logger.info("    %s: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+        else:
+            logger.error("    %s: NO predictions generated", model_name)
+            fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
 
-                if not result.success:
-                    logger.error("    %s fold %d FAILED: %s", model_name, fold_id, result.error_message)
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "failed", "error": result.error_message})
-                    continue
+        all_runtime_rows.extend(runtime_rows)
 
-                if result.predictions_df is None or result.predictions_df.empty:
-                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "empty"})
-                    continue
-
-                df = _normalize_tap_predictions(
-                    result.predictions_df, task=target, model_name=model_name,
-                    fold_id=fold_id, fold_info=fold_info,
-                    predict_date=predict_date,
-                )
-                df["tap_source"] = "rolling_cutoff"
-                df["source_confidence"] = 1.0
-
-                df.to_csv(pred_file, index=False)
-                all_frames.append(df)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(df)})
-                logger.info("    %s fold %d: %d rows (sgdfnet)", model_name, fold_id, len(df))
-
-            except Exception as exc:
-                logger.error("    %s fold %d exception: %s", model_name, fold_id, exc)
-                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "exception", "error": str(exc)})
+    # Save runtime report if any model produced timing data
+    if all_runtime_rows:
+        save_runtime_report(all_runtime_rows, output_dir)
 
     # Assemble tap long table
     if all_frames:
@@ -518,6 +501,283 @@ def run_validation_tap(
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
 
     return tap_table_path
+
+
+# ── Helper: per-fold online fallback ────────────────────────────────
+def _run_online_per_fold(
+    adapter,
+    model_name: str,
+    target: str,
+    fold_specs: list[dict],
+    all_fold_specs: list[FoldSpec],
+    data_path: str,
+    output_dir: Path,
+    folds_dir: Path,
+    checkpoint_dir: Path,
+    force: bool,
+    kwargs: dict,
+    all_frames: list[pd.DataFrame],
+    fold_results: list[dict],
+):
+    """Fallback: run online models fold-by-fold (may re-train base each time).
+
+    This is the original per-fold logic, kept as fallback when the adapter
+    does not support batch run_online_validation_tap.
+    """
+    from rolling_oof.contracts import FoldSpec
+
+    for fold_info in fold_specs:
+        fold_id = fold_info["fold_id"]
+        fold_dir = folds_dir / f"fold_{fold_id:02d}"
+        fold_dir.mkdir(exist_ok=True)
+        pred_file = fold_dir / f"{model_name}_predictions.csv"
+
+        # Cache check
+        if not force and _file_nonempty(pred_file):
+            logger.info("    SKIP %s fold %d — cached", model_name, fold_id)
+            df = pd.read_csv(pred_file)
+            all_frames.append(df)
+            fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "cached"})
+            continue
+
+        fs = all_fold_specs[fold_id]
+
+        try:
+            online_kwargs = {
+                "rolling_mode": "online",
+                "training_months": kwargs.get("training_months", TRAINING_WINDOW_MONTHS),
+                "block_days": 3,
+                "online_epochs": kwargs.get(f"{model_name}_online_epochs", 3),
+                "online_lr": kwargs.get(f"{model_name}_online_lr"),
+                "checkpoint_dir": str(checkpoint_dir),
+            }
+
+            logger.info("    %s fold %d: online update (per-fold)...", model_name, fold_id)
+            result = adapter.fold_train_predict(
+                task=target, fold_spec=fs, data_path=data_path,
+                **online_kwargs,
+            )
+
+            if not result.success:
+                logger.error("    %s fold %d FAILED: %s", model_name, fold_id, result.error_message)
+                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "failed", "error": result.error_message})
+                continue
+
+            if result.predictions_df is None or result.predictions_df.empty:
+                fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "empty"})
+                continue
+
+            df = _normalize_tap_predictions(
+                result.predictions_df, task=target, model_name=model_name,
+                fold_id=fold_id, fold_info=fold_info,
+                predict_date=kwargs.get("predict_date", ""),
+            )
+            df["tap_source"] = "online_update"
+            df["source_confidence"] = 0.95
+            df["checkpoint_path"] = str(checkpoint_dir)
+
+            df.to_csv(pred_file, index=False)
+            all_frames.append(df)
+            fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "complete", "n_rows": len(df)})
+            logger.info("    %s fold %d: %d rows (online per-fold)", model_name, fold_id, len(df))
+
+        except Exception as exc:
+            logger.error("    %s fold %d exception: %s", model_name, fold_id, exc)
+            fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "exception", "error": str(exc)})
+
+
+# ── Batch online helpers: direct pipeline calls (P0-2, P0-3 fix) ────
+
+def _timemixer_online_batch(
+    target: str,
+    data_path: str,
+    fold_specs: list[FoldSpec],
+    checkpoint_dir: str,
+    training_months: int = 6,
+    online_epochs: int = 3,
+    online_lr: float | None = None,
+) -> pd.DataFrame | None:
+    """TimeMixer online: base train once + sequential block updates.
+
+    Creates a merged fold (D-30 ~ D-1) and calls run_monthly_reproduction
+    with training_mode='online'. This ensures base train only happens once,
+    followed by 10 sequential block predict+update steps.
+    """
+    import os as _os
+    from TimeMixer.repro_pipeline import RunConfig, run_monthly_reproduction
+
+    _os.environ["OPTIM_NUM_WORKERS"] = "0"
+    _os.environ["OPTIM_PIN_MEMORY"] = "0"
+
+    if not fold_specs:
+        return None
+
+    # Sort by fold_id to ensure correct order
+    fold_specs = sorted(fold_specs, key=lambda f: f.fold_id)
+
+    # merged: test_start = D-30 (first fold), test_end_exclusive = D (last fold + 1)
+    merged_test_start = fold_specs[0].test_start
+    merged_test_end = fold_specs[-1].test_end
+
+    output_dir = f"oof_runs/timemixer_batch_online_{target}"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "[timemixer_online_batch] base train to %s, test %s ~ %s, %d folds",
+        fold_specs[0].train_end, merged_test_start, merged_test_end, len(fold_specs),
+    )
+
+    run_cfg = RunConfig(
+        data_path=data_path,
+        output_dir=output_dir,
+        month="",
+        test_start=merged_test_start.isoformat(),
+        test_end_exclusive=(merged_test_end + timedelta(days=1)).isoformat(),
+        training_mode="online",
+        block_days=3,
+        train_months=training_months,
+        checkpoint_dir=checkpoint_dir,
+        online_epochs=online_epochs,
+        online_lr=online_lr,
+    )
+
+    result = run_monthly_reproduction(run_cfg)
+    if result is None:
+        return None
+
+    pred_key = "da_predictions" if target == "dayahead" else "rt_predictions"
+    predictions = result.get(pred_key)
+    if predictions is None:
+        return None
+
+    if isinstance(predictions, pd.DataFrame):
+        combined = predictions
+    elif isinstance(predictions, list):
+        combined = pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()
+    else:
+        return None
+
+    if combined.empty:
+        return None
+
+    # Ensure ds is datetime
+    combined = combined.copy()
+    combined["ds"] = pd.to_datetime(combined["ds"], errors="coerce")
+
+    # Add tap_fold_id and age_block
+    date_to_fold = {}
+    for fs in fold_specs:
+        current = fs.test_start
+        while current <= fs.test_end:
+            date_to_fold[current] = fs.fold_id
+            current += timedelta(days=1)
+
+    combined["tap_fold_id"] = combined["ds"].apply(
+        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    )
+    combined["age_block"] = combined["tap_fold_id"].apply(
+        lambda fid: 9 - fid if 0 <= fid <= 9 else -1
+    )
+
+    logger.info(
+        "[timemixer_online_batch] %d rows, folds=%s",
+        len(combined), sorted(combined["tap_fold_id"].unique().tolist()),
+    )
+    return combined
+
+
+def _rt916_online_batch(
+    target: str,
+    data_path: str,
+    fold_specs: list[FoldSpec],
+    checkpoint_dir: str,
+    online_epochs: int = 3,
+    online_lr: float | None = None,
+) -> pd.DataFrame | None:
+    """RT916 online: base train once + sequential block updates.
+
+    Calls pipeline.online_predict_range with all fold_specs, which
+    correctly does walk-forward with single base train.
+    """
+    import os as _os
+    from RT916_SpikeFusionNet.pipeline import ModelPipeline
+
+    _os.environ["OPTIM_AMP"] = "0"  # RT916: disable AMP during inference
+    _os.environ["OPTIM_NUM_WORKERS"] = "0"
+
+    pipeline = ModelPipeline()
+    logger.info("[rt916_online_batch] %d folds, checkpoint=%s", len(fold_specs), checkpoint_dir)
+
+    results = pipeline.online_predict_range(
+        target=target,
+        fold_specs=fold_specs,
+        checkpoint_root=checkpoint_dir,
+        online_epochs=online_epochs,
+        online_lr=online_lr,
+        data_path=data_path,
+    )
+
+    if not results:
+        return None
+
+    valid = [r for r in results if r is not None and len(r) > 0]
+    if not valid:
+        return None
+
+    merged = pd.concat(valid, ignore_index=True)
+
+    # Handle RT916's column naming (时刻 column)
+    if "ds" not in merged.columns and "时刻" in merged.columns:
+        merged["ds"] = pd.to_datetime(merged["时刻"], errors="coerce")
+    else:
+        merged["ds"] = pd.to_datetime(merged["ds"], errors="coerce")
+
+    merged = merged.sort_values("ds").drop_duplicates(subset=["ds"], keep="last").reset_index(drop=True)
+
+    # Add tap_fold_id and age_block
+    date_to_fold = {}
+    for fs in fold_specs:
+        current = fs.test_start
+        while current <= fs.test_end:
+            date_to_fold[current] = fs.fold_id
+            current += timedelta(days=1)
+
+    merged["tap_fold_id"] = merged["ds"].apply(
+        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    )
+    merged["age_block"] = merged["tap_fold_id"].apply(
+        lambda fid: 9 - fid if 0 <= fid <= 9 else -1
+    )
+
+    logger.info(
+        "[rt916_online_batch] %d rows, folds=%s",
+        len(merged), sorted(merged["tap_fold_id"].unique().tolist()),
+    )
+    return merged
+
+
+def _split_fold_predictions(
+    combined_df: pd.DataFrame,
+    fold_info: dict,
+    fold_id: int,
+) -> pd.DataFrame:
+    """Split combined batch predictions to per-fold DataFrame."""
+    # Try tap_fold_id first
+    if "tap_fold_id" in combined_df.columns:
+        fold_df = combined_df[combined_df["tap_fold_id"] == fold_id].copy()
+        if not fold_df.empty:
+            return fold_df
+
+    # Fallback: filter by ds range
+    test_start = pd.Timestamp(fold_info["test_start"])
+    test_end = pd.Timestamp(fold_info["test_end"])
+    if "ds" in combined_df.columns:
+        mask = (pd.to_datetime(combined_df["ds"], errors="coerce") >= test_start) & (
+            pd.to_datetime(combined_df["ds"], errors="coerce") <= test_end
+        )
+        return combined_df[mask].copy()
+
+    return pd.DataFrame()
 
 
 def _normalize_tap_predictions(

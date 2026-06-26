@@ -99,6 +99,9 @@ def _run_bgew_update(
 ) -> tuple[dict[str, float], list[dict]]:
     """Run BGEW update from most recent fold to oldest.
 
+    Uses pre-computed _sample_gate column (added by run_r3d_tap_gef).
+    Update order: fold 9 -> fold 0 (most recent to oldest).
+
     Returns (final_weights, trace_rows).
     """
     n_models = len(models)
@@ -109,7 +112,7 @@ def _run_bgew_update(
     fold_info = (
         tap_df.groupby("tap_fold_id")
         .agg(age_block=("age_block", "first"))
-        .sort_values("age_block", ascending=True)
+        .sort_values("age_block", ascending=False)  # most recent first (9 -> 0)
     )
     fold_ids = fold_info.index.tolist()
 
@@ -121,41 +124,41 @@ def _run_bgew_update(
         age_block = int(fold_data["age_block"].iloc[0])
         recency_gate = float(np.exp(-age_block / tau_block))
 
-        # Compute per-sample sample_gate with enhanced components
-        fold_data = fold_data.copy()
-        fold_data["_horizon_gate"] = fold_data["horizon_day"].apply(
-            lambda h: float(np.exp(-(h - 1) / tau_horizon))
-        )
-
-        # source_confidence: from tap data if available, else default 1.0
-        if "source_confidence" in fold_data.columns:
-            fold_data["_source_conf"] = fold_data["source_confidence"].fillna(1.0)
+        # Use pre-computed _sample_gate (persisted by run_r3d_tap_gef)
+        if "_sample_gate" in fold_data.columns:
+            fold_data = fold_data.copy()
+            # Get per-ds gate values (use first occurrence per ds)
+            gate_per_ds = fold_data.drop_duplicates(subset=["ds"]).set_index("ds")["_sample_gate"]
         else:
-            fold_data["_source_conf"] = 1.0
-
-        # day_age_gate: compute from age_days if available
-        if "age_days" in fold_data.columns:
-            fold_data["_day_age_gate"] = fold_data["age_days"].apply(
-                lambda d: float(np.exp(-d / tau_days)) if pd.notna(d) else 1.0
+            # Fallback: compute gate on the fly (should not happen if run_r3d_tap_gef is used)
+            logger.warning("_sample_gate not found, computing on the fly")
+            fold_data = fold_data.copy()
+            recency_gate_local = float(np.exp(-age_block / tau_block))
+            fold_data["_horizon_gate"] = fold_data["horizon_day"].apply(
+                lambda h: float(np.exp(-(h - 1) / tau_horizon)) if pd.notna(h) else 1.0
             )
-        else:
-            # Fallback: use age_block * 3 as approximate age_days
-            fold_data["_day_age_gate"] = fold_data["age_block"].apply(
-                lambda a: float(np.exp(-(a * 3) / tau_days))
+            if "age_days" in fold_data.columns:
+                fold_data["_day_age_gate"] = fold_data["age_days"].apply(
+                    lambda d: float(np.exp(-d / tau_days)) if pd.notna(d) else 1.0
+                )
+            else:
+                fold_data["_day_age_gate"] = fold_data["age_block"].apply(
+                    lambda a: float(np.exp(-(a * 3) / tau_days)) if pd.notna(a) else 1.0
+                )
+            fold_data["_source_conf"] = fold_data.get("source_confidence", pd.Series(1.0)).fillna(1.0)
+            fold_data["_sample_gate"] = (
+                recency_gate_local
+                * fold_data["_day_age_gate"]
+                * fold_data["_horizon_gate"]
+                * fold_data["_source_conf"]
             )
+            gate_per_ds = fold_data.drop_duplicates(subset=["ds"]).set_index("ds")["_sample_gate"]
 
-        fold_data["_sample_gate"] = (
-            recency_gate
-            * fold_data["_day_age_gate"]
-            * fold_data["_horizon_gate"]
-            * fold_data["_source_conf"]
-        )
-
-        # Get y_true (same for all models, take from first available per ds)
+        # Get y_true and gate values aligned by ds
         truth = fold_data.drop_duplicates(subset=["ds"])[["ds", "y_true"]]
         y_true = truth["y_true"].values.astype(float)
         ds_vals = truth["ds"].values
-        gate_vals = fold_data.drop_duplicates(subset=["ds"]).set_index("ds")["_sample_gate"].reindex(ds_vals).values.astype(float)
+        gate_vals = gate_per_ds.reindex(ds_vals).values.astype(float)
 
         # Compute per-model weighted loss across ALL samples in this fold
         model_losses: dict[str, float] = {}
@@ -219,9 +222,6 @@ def _run_bgew_update(
         total = sum(weights.values())
         if total > 0:
             weights = {m: w / total for m, w in weights.items()}
-
-    # Update trace with final normalized weights (post-fold normalization)
-    # (The weight_after in trace is pre-normalization; that's fine for debugging)
 
     return weights, trace_rows
 
@@ -292,6 +292,8 @@ def _convex_refit(
     *,
     lam: float,
     weight_floor: float,
+    tau_block: float = DEFAULT_TAU_BLOCK,
+    tau_horizon: float = DEFAULT_TAU_HORIZON,
 ) -> tuple[dict[str, float], str]:
     """Constrained convex optimization to refine BGEW weights.
 
@@ -319,13 +321,19 @@ def _convex_refit(
             m_data = tap_df[tap_df["model_name"] == m].drop_duplicates(subset=["ds"])
             model_pred_maps[m] = m_data.set_index("ds")["y_pred"]
 
-        # Compute sample gates
+        # Compute sample gates - use pre-computed _sample_gate if available
         gate_map = {}
-        for _, row in tap_df.drop_duplicates(subset=["ds"]).iterrows():
-            ds = row["ds"]
-            age = row.get("age_block", 0)
-            horizon = row.get("horizon_day", 1)
-            gate_map[ds] = np.exp(-age / 3.0) * np.exp(-(horizon - 1) / 2.0)
+        if "_sample_gate" in tap_df.columns:
+            # Use pre-computed sample gate (includes recency * day_age * horizon * source_confidence)
+            for ds_val, gate_val in tap_df.drop_duplicates(subset=["ds"])[["ds", "_sample_gate"]].values:
+                gate_map[ds_val] = float(gate_val)
+        else:
+            # Fallback: compute gate from components (should not happen if run_r3d_tap_gef pre-computes)
+            for _, row in tap_df.drop_duplicates(subset=["ds"]).iterrows():
+                ds = row["ds"]
+                age = row.get("age_block", 0)
+                horizon = row.get("horizon_day", 1)
+                gate_map[ds] = float(np.exp(-age / tau_block) * np.exp(-(horizon - 1) / tau_horizon))
 
         # Filter to ds where all models have predictions
         valid_ds = []
@@ -400,6 +408,68 @@ def _convex_refit(
         return w_bgew, "bgew_fallback"
 
 
+# ── Sample gate computation ─────────────────────────────────────────
+def _compute_sample_gate(
+    tap_df: pd.DataFrame,
+    *,
+    tau_block: float,
+    tau_horizon: float,
+    tau_days: float,
+) -> pd.DataFrame:
+    """Pre-compute _sample_gate for all samples in tap_df.
+
+    The sample gate is: recency_gate * day_age_gate * horizon_gate * source_confidence.
+    This function adds _sample_gate column to tap_df (modifies in-place).
+
+    Parameters
+    ----------
+    tap_df : pd.DataFrame
+        Validation tap long table. Must have columns:
+        age_block, horizon_day, age_days, source_confidence.
+        If source_confidence is missing, defaults to 1.0.
+        If age_days is missing, approximates with age_block * 3.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same DataFrame with _sample_gate column added.
+    """
+    df = tap_df.copy()
+
+    # recency_gate = exp(-age_block / tau_block)
+    if "age_block" in df.columns:
+        df["_recency_gate"] = df["age_block"].apply(lambda a: float(np.exp(-a / tau_block)) if pd.notna(a) else 1.0)
+    else:
+        df["_recency_gate"] = 1.0
+
+    # horizon_gate = exp(-(horizon_day - 1) / tau_horizon)
+    if "horizon_day" in df.columns:
+        df["_horizon_gate"] = df["horizon_day"].apply(lambda h: float(np.exp(-(h - 1) / tau_horizon)) if pd.notna(h) else 1.0)
+    else:
+        df["_horizon_gate"] = 1.0
+
+    # day_age_gate = exp(-age_days / tau_days)
+    if "age_days" in df.columns:
+        df["_day_age_gate"] = df["age_days"].apply(lambda d: float(np.exp(-d / tau_days)) if pd.notna(d) else 1.0)
+    else:
+        # Fallback: approximate age_days with age_block * 3
+        if "age_block" in df.columns:
+            df["_day_age_gate"] = df["age_block"].apply(lambda a: float(np.exp(-(a * 3) / tau_days)) if pd.notna(a) else 1.0)
+        else:
+            df["_day_age_gate"] = 1.0
+
+    # source_confidence
+    if "source_confidence" in df.columns:
+        df["_source_conf"] = df["source_confidence"].fillna(1.0)
+    else:
+        df["_source_conf"] = 1.0
+
+    # sample_gate = product of all gates
+    df["_sample_gate"] = df["_recency_gate"] * df["_day_age_gate"] * df["_horizon_gate"] * df["_source_conf"]
+
+    return df
+
+
 # ── Main entry point ─────────────────────────────────────────────────
 def run_r3d_tap_gef(
     tap_df: pd.DataFrame,
@@ -434,6 +504,14 @@ def run_r3d_tap_gef(
     all_metrics_rows: list[dict] = []
     all_coverage_rows: list[dict] = []
     warnings: list[str] = []
+
+    # Pre-compute _sample_gate for all samples (persist into tap_df)
+    tap_df = _compute_sample_gate(
+        tap_df,
+        tau_block=tau_block,
+        tau_horizon=tau_horizon,
+        tau_days=tau_days,
+    )
 
     # Group by (task, period)
     groups = tap_df.groupby(["task", "period"])
@@ -484,6 +562,8 @@ def run_r3d_tap_gef(
             group_df, task, period, models, w_shrunk,
             lam=lambda_refit,
             weight_floor=weight_floor,
+            tau_block=tau_block,
+            tau_horizon=tau_horizon,
         )
 
         # Record weights

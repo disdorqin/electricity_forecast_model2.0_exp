@@ -541,6 +541,34 @@ def run_validation_tap(
         # P0-2: Fill y_true from raw data (TimeMixer/RT916 buffered output has NaN y_true)
         tap_df = fill_y_true_from_data(tap_df, data_path, target)
 
+        # P0-5: y_true coverage check before writing
+        y_true_col = "y_true"
+        if y_true_col in tap_df.columns and "model_name" in tap_df.columns:
+            total_rows = len(tap_df)
+            y_true_valid = tap_df[y_true_col].notna().sum()
+            coverage_pct = 100.0 * y_true_valid / total_rows if total_rows > 0 else 0.0
+            logger.info("y_true coverage: %.1f%% (%d/%d)", coverage_pct, y_true_valid, total_rows)
+
+            # Per-model check
+            for mdl in tap_df["model_name"].unique():
+                mdl_df = tap_df[tap_df["model_name"] == mdl]
+                mdl_valid = mdl_df[y_true_col].notna().sum()
+                mdl_total = len(mdl_df)
+                mdl_pct = 100.0 * mdl_valid / mdl_total if mdl_total > 0 else 0.0
+                if mdl_valid == 0:
+                    logger.error("y_true ALL NaN for model '%s' (%d rows) — learner will have no ground truth!", mdl, mdl_total)
+                elif mdl_pct < 50.0:
+                    logger.warning("y_true LOW coverage for model '%s': %.1f%% (%d/%d)", mdl, mdl_pct, mdl_valid, mdl_total)
+                else:
+                    logger.info("y_true model '%s': %.1f%% (%d/%d)", mdl, mdl_pct, mdl_valid, mdl_total)
+
+            # Store coverage in fold_results for manifest
+            fold_results.append({
+                "y_true_coverage_pct": round(coverage_pct, 2),
+                "y_true_valid_count": int(y_true_valid),
+                "y_true_total_count": total_rows,
+            })
+
         tap_df.to_csv(tap_table_path, index=False)
         logger.info("Validation tap: %d rows, %d models", len(tap_df), len(models))
     else:
@@ -1025,7 +1053,10 @@ def fill_y_true_from_data(
     target_col = "day_ahead_clearing_price" if task == "dayahead" else "realtime_price"
 
     try:
-        raw = pd.read_csv(data_path, parse_dates=["ds"])
+        try:
+            raw = pd.read_csv(data_path, encoding="utf-8", parse_dates=["ds"])
+        except (UnicodeDecodeError, LookupError):
+            raw = pd.read_csv(data_path, encoding="gbk", parse_dates=["ds"])
     except Exception:
         logger.warning("fill_y_true: cannot read %s", data_path)
         return df

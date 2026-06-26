@@ -484,12 +484,15 @@ def run_timesfm_daily_validation_tap(
                 logger.info("  [timesfm_daily] cutoff=%s -> predict %s", cutoff, d)
 
                 # cutoff-safe: build temp data truncated to cutoff_date
-                _raw = pd.read_csv(data_path)
+                try:
+                    _raw = pd.read_csv(data_path, encoding="utf-8")
+                except UnicodeDecodeError:
+                    _raw = pd.read_csv(data_path, encoding="gbk")
                 _raw["ds"] = pd.to_datetime(_raw["ds"], errors="coerce")
                 _cutoff_ts = pd.Timestamp(cutoff.isoformat()) + pd.Timedelta(hours=23)
                 _truncated = _raw[_raw["ds"] <= _cutoff_ts].copy()
                 _temp_path = str(daily_dir / f"_temp_cutoff_{cutoff.isoformat()}.csv")
-                _truncated.to_csv(_temp_path, index=False)
+                _truncated.to_csv(_temp_path, index=False, encoding="utf-8")
 
                 daily_df = predict_price_for_range(
                     data_path=_temp_path,

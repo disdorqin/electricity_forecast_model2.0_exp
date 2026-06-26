@@ -726,7 +726,15 @@ def _timemixer_online_batch(
     combined = combined.copy()
     combined["ds"] = pd.to_datetime(combined["ds"], errors="coerce")
 
-    # Add tap_fold_id and age_block
+    # Compute business_day if not present
+    if "business_day" not in combined.columns:
+        combined["business_day"] = combined["ds"].apply(
+            lambda t: (t - pd.Timedelta(days=1)).normalize()
+            if pd.notna(t) and t.hour == 0
+            else (t.normalize() if pd.notna(t) else None)
+        )
+
+    # Add tap_fold_id and age_block using business_day (NOT ds)
     date_to_fold = {}
     for fs in fold_specs:
         current = fs.test_start
@@ -734,8 +742,8 @@ def _timemixer_online_batch(
             date_to_fold[current] = fs.fold_id
             current += timedelta(days=1)
 
-    combined["tap_fold_id"] = combined["ds"].apply(
-        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    combined["tap_fold_id"] = combined["business_day"].apply(
+        lambda d: date_to_fold.get(d, -1) if pd.notna(d) else -1
     )
     combined["age_block"] = combined["tap_fold_id"].apply(
         lambda fid: 9 - fid if 0 <= fid <= 9 else -1
@@ -804,8 +812,16 @@ def _rt916_online_batch(
             date_to_fold[current] = fs.fold_id
             current += timedelta(days=1)
 
-    merged["tap_fold_id"] = merged["ds"].apply(
-        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    # Compute business_day if not present
+    if "business_day" not in merged.columns:
+        merged["business_day"] = merged["ds"].apply(
+            lambda t: (t - pd.Timedelta(days=1)).normalize()
+            if pd.notna(t) and t.hour == 0
+            else (t.normalize() if pd.notna(t) else None)
+        )
+
+    merged["tap_fold_id"] = merged["business_day"].apply(
+        lambda d: date_to_fold.get(d, -1) if pd.notna(d) else -1
     )
     merged["age_block"] = merged["tap_fold_id"].apply(
         lambda fid: 9 - fid if 0 <= fid <= 9 else -1
@@ -830,9 +846,13 @@ def _split_fold_predictions(
         if not fold_df.empty:
             return fold_df
 
-    # Fallback: filter by ds range
+    # Fallback: filter by business_day range (NOT ds, because hour 24 of day D has timestamp D+1)
     test_start = pd.Timestamp(fold_info["test_start"])
     test_end = pd.Timestamp(fold_info["test_end"])
+    if "business_day" in combined_df.columns:
+        biz = pd.to_datetime(combined_df["business_day"], errors="coerce")
+        mask = (biz >= test_start) & (biz <= test_end)
+        return combined_df[mask].copy()
     if "ds" in combined_df.columns:
         mask = (pd.to_datetime(combined_df["ds"], errors="coerce") >= test_start) & (
             pd.to_datetime(combined_df["ds"], errors="coerce") <= test_end
@@ -1106,6 +1126,14 @@ def _timemixer_single_train_range(
     combined = combined.copy()
     combined["ds"] = pd.to_datetime(combined["ds"], errors="coerce")
 
+    # Compute business_day if not present
+    if "business_day" not in combined.columns:
+        combined["business_day"] = combined["ds"].apply(
+            lambda t: (t - pd.Timedelta(days=1)).normalize()
+            if pd.notna(t) and t.hour == 0
+            else (t.normalize() if pd.notna(t) else None)
+        )
+
     # Slice into learner_tap_fold_id 0..9
     date_to_fold = {}
     for fs in fold_specs:
@@ -1114,8 +1142,8 @@ def _timemixer_single_train_range(
             date_to_fold[current] = fs.fold_id
             current += timedelta(days=1)
 
-    combined["tap_fold_id"] = combined["ds"].apply(
-        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    combined["tap_fold_id"] = combined["business_day"].apply(
+        lambda d: date_to_fold.get(d, -1) if pd.notna(d) else -1
     )
     combined["learner_tap_fold_id"] = combined["tap_fold_id"]
     combined["age_block"] = combined["tap_fold_id"].apply(lambda fid: 9 - fid if 0 <= fid <= 9 else -1)

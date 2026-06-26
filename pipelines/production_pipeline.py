@@ -569,6 +569,8 @@ def _apply_weights(forecast_df, weights_df, target):
                 "hour_business": hb_val,
                 "available_models": str(sorted(available)),
                 "missing_models": str(sorted(missing)),
+                "raw_weights": str({m: round(w_dict.get(m, 0), 4) for m in available}),
+                "renormalized_weights": str({m: round(w, 4) for m, w in avail_w.items()}),
                 "weight_summary": str({m: round(w, 4) for m, w in avail_w.items()}),
                 "renormalized": len(missing) > 0,
             })

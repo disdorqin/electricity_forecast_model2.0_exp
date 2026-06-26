@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -108,6 +109,10 @@ def split_month_predictions_to_learner_folds(
     """Split 30-day predictions into 10 learner folds (tap_fold_id 0..9).
 
     Adds columns: tap_fold_id, learner_tap_fold_id, age_block, age_days, horizon_day.
+
+    IMPORTANT: Fold assignment uses business_day, NOT ds.date().
+    Hour 24 of business_day D has timestamp D+1 00:00:00, so using ds.date()
+    would put it in the wrong fold.
     """
     if predictions_df.empty:
         return predictions_df
@@ -116,38 +121,50 @@ def split_month_predictions_to_learner_folds(
     D = pd.Timestamp(predict_date).date()
     date_map = build_date_to_fold_map(predict_date)
 
-    # Ensure date column exists
-    date_col = None
-    for col in ("target_day", "business_day", "ds", "timestamp"):
-        if col in df.columns:
-            date_col = col
-            break
+    # Ensure ds column exists (normalize from timestamp if needed)
+    if "ds" not in df.columns:
+        for col in ("timestamp", "datetime", "time"):
+            if col in df.columns:
+                if "ds" in df.columns:
+                    df = df.drop(columns=[col])
+                else:
+                    df = df.rename(columns={col: "ds"})
+                break
 
-    if date_col is None:
-        logger.warning("split_month_predictions: no date column found")
-        df["tap_fold_id"] = -1
-        df["learner_tap_fold_id"] = -1
-        df["age_block"] = -1
-        df["age_days"] = -1
-        df["horizon_day"] = -1
-        return df
+    if "ds" in df.columns:
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
 
-    # Normalize date column name to 'ds' for downstream compatibility
-    if date_col != "ds":
+    # Compute business_day if not present
+    # business_day: hour 24 of day D = D+1 00:00:00, so business_day = ds.date() if hour > 0, else ds.date() - 1
+    if "business_day" not in df.columns:
         if "ds" in df.columns:
-            # Already has ds, drop the duplicate date column
-            df = df.drop(columns=[date_col])
-        else:
-            df = df.rename(columns={date_col: "ds"})
+            df["business_day"] = df["ds"].apply(
+                lambda t: (t - pd.Timedelta(days=1)).date()
+                if pd.notna(t) and t.hour == 0
+                else (t.date() if pd.notna(t) else None)
+            )
+        elif "target_day" in df.columns:
+            df["business_day"] = pd.to_datetime(df["target_day"], errors="coerce").dt.date
 
-    parsed = pd.to_datetime(df["ds"], errors="coerce").dt.date
-    df["tap_fold_id"] = parsed.map(lambda d: date_map.get(d, -1))
+    # Use business_day for fold assignment (NOT ds.date())
+    if "business_day" in df.columns:
+        biz_dates = pd.to_datetime(df["business_day"], errors="coerce").dt.date
+        df["tap_fold_id"] = biz_dates.map(lambda d: date_map.get(d, -1))
+        df["age_days"] = biz_dates.map(lambda d: (D - d).days if d is not None else -1)
+    else:
+        # Fallback: use ds.date() (may be wrong for hour 24)
+        parsed = pd.to_datetime(df["ds"], errors="coerce").dt.date if "ds" in df.columns else None
+        if parsed is not None:
+            df["tap_fold_id"] = parsed.map(lambda d: date_map.get(d, -1))
+            df["age_days"] = parsed.map(lambda d: (D - d).days if d is not None else -1)
+        else:
+            df["tap_fold_id"] = -1
+            df["age_days"] = -1
+
     df["learner_tap_fold_id"] = df["tap_fold_id"]
     df["age_block"] = df["tap_fold_id"].apply(lambda fid: 9 - fid if 0 <= fid <= 9 else -1)
-    df["age_days"] = parsed.map(lambda d: (D - d).days if d is not None else -1)
 
     # horizon_day: which day within the 3-day fold (1, 2, or 3)
-    # fold 0 starts at D-30, so day offset = 30 - (D-d) = 30 - age_days
     df["horizon_day"] = df["age_days"].apply(
         lambda ad: ((30 - ad - 1) % 3) + 1 if 1 <= ad <= 30 else -1
     )
@@ -415,7 +432,8 @@ def run_timesfm_daily_validation_tap(
     if not force:
         for offset in range(TOTAL_VALIDATION_DAYS, 0, -1):
             d = D - timedelta(days=offset)
-            cache_file = daily_dir / f"daily_{target}_{d.isoformat()}.csv"
+            cutoff = d - timedelta(days=1)
+            cache_file = daily_dir / f"daily_{target}_{d.isoformat()}_cutoff_{cutoff.isoformat()}.csv"
             if not _file_nonempty(cache_file):
                 all_cached = False
                 break
@@ -424,7 +442,8 @@ def run_timesfm_daily_validation_tap(
         logger.info("  [timesfm_daily] all 30 daily caches present, loading")
         for offset in range(TOTAL_VALIDATION_DAYS, 0, -1):
             d = D - timedelta(days=offset)
-            cache_file = daily_dir / f"daily_{target}_{d.isoformat()}.csv"
+            cutoff = d - timedelta(days=1)
+            cache_file = daily_dir / f"daily_{target}_{d.isoformat()}_cutoff_{cutoff.isoformat()}.csv"
             df = pd.read_csv(cache_file)
             all_frames.append(df)
             runtime_rows.append({
@@ -464,9 +483,16 @@ def run_timesfm_daily_validation_tap(
             try:
                 logger.info("  [timesfm_daily] cutoff=%s -> predict %s", cutoff, d)
 
-                # cutoff-safe: build temp data with masked future
+                # cutoff-safe: build temp data truncated to cutoff_date
+                _raw = pd.read_csv(data_path)
+                _raw["ds"] = pd.to_datetime(_raw["ds"], errors="coerce")
+                _cutoff_ts = pd.Timestamp(cutoff.isoformat()) + pd.Timedelta(hours=23)
+                _truncated = _raw[_raw["ds"] <= _cutoff_ts].copy()
+                _temp_path = str(daily_dir / f"_temp_cutoff_{cutoff.isoformat()}.csv")
+                _truncated.to_csv(_temp_path, index=False)
+
                 daily_df = predict_price_for_range(
-                    data_path=data_path,
+                    data_path=_temp_path,
                     start_date=d.isoformat(),
                     end_date=d.isoformat(),
                     target=target,
@@ -474,6 +500,12 @@ def run_timesfm_daily_validation_tap(
                     seed=seed,
                     deterministic=deterministic,
                 )
+
+                # Clean up temp file
+                try:
+                    os.remove(_temp_path)
+                except OSError:
+                    pass
 
                 if daily_df is not None and not daily_df.empty:
                     daily_df["model_name"] = "timesfm"

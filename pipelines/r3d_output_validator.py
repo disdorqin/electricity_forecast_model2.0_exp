@@ -52,16 +52,17 @@ def validate_tap_long_table(
     if missing:
         return results  # cannot validate further
 
-    # 2. Date coverage: D-30 ~ D-1
+    # 2. Date coverage: D-30 ~ D-1 (use business_day if available)
     d = pd.Timestamp(predict_date)
     expected_start = (d - timedelta(days=30)).strftime("%Y-%m-%d")
     expected_end = (d - timedelta(days=1)).strftime("%Y-%m-%d")
-    actual_dates = sorted(df["target_day"].unique())
+    date_col = "business_day" if "business_day" in df.columns else "target_day"
+    actual_dates = sorted(df[date_col].unique())
     actual_start = actual_dates[0] if actual_dates else "?"
     actual_end = actual_dates[-1] if actual_dates else "?"
     results.append(_check(
         actual_start == expected_start and actual_end == expected_end,
-        f"date coverage D-30~D-1 (expected {expected_start}~{expected_end}, got {actual_start}~{actual_end})"
+        f"date coverage D-30~D-1 via {date_col} (expected {expected_start}~{expected_end}, got {actual_start}~{actual_end})"
     ))
 
     # 3. tap_fold_id count
@@ -71,12 +72,12 @@ def validate_tap_long_table(
         f"tap_fold_id has {expected_folds} values (got {len(fold_ids)}: {fold_ids})"
     ))
 
-    # 4. Each fold covers exactly 3 days
+    # 4. Each fold covers exactly 3 business_days
     for fid in fold_ids:
-        fold_dates = df[df["tap_fold_id"] == fid]["target_day"].nunique()
+        fold_dates = df[df["tap_fold_id"] == fid][date_col].nunique()
         results.append(_check(
             fold_dates == expected_block_days,
-            f"fold {fid} covers {expected_block_days} days (got {fold_dates})"
+            f"fold {fid} covers {expected_block_days} {date_col}s (got {fold_dates})"
         ))
 
     # 5. horizon_day is only 1, 2, or 3
@@ -178,9 +179,9 @@ def validate_run_manifest(
                     step_name in steps,
                     f"step '{step_name}' recorded in manifest"
                 ))
-        # Also check for final_outputs
+        # Also check for final_outputs (can be in steps or as top-level key)
         results.append(_check(
-            "final_outputs" in steps or any("final" in k for k in steps),
+            "final_outputs" in steps or "final_outputs" in manifest or any("final" in k for k in steps),
             f"step 'final_outputs' recorded in manifest"
         ))
 

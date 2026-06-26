@@ -2764,12 +2764,17 @@ def load_segment_checkpoint(
     # For TimeMixer, pred_len is always the segment length which is embedded in the head
     # We need to figure out pred_len from the model state dict
     state_dict = ckpt["model_state_dict"]
-    # Find pred_len from head.weight shape: head.0.weight has shape [pred_len * (scales+1) * hidden_dim_out, ...]
-    # Actually, the head is: LayerNorm(hidden_dim*(scales+1)) -> Linear -> pred_len
-    # So head.2.weight shape is [pred_len, hidden_dim*(scales+1)]
-    head_key = [k for k in state_dict if k.startswith("head.") and "weight" in k]
-    if head_key:
-        pred_len = state_dict[head_key[0]].shape[0]
+    # Find pred_len from the LAST head layer weight (final output projection).
+    # TimeMixer head has multiple Linear layers (head.0, head.2, head.4, head.7...).
+    # head.0 is intermediate (shape[0]=hidden_dim*(scales+1)=256), NOT pred_len.
+    # head.7 is the final output (shape[0]=pred_len=8 for a segment).
+    # Must sort by head index and pick head_keys[-1], not head_keys[0].
+    head_keys = sorted(
+        [k for k in state_dict if k.startswith("head.") and "weight" in k],
+        key=lambda k: int(k.split(".")[1]) if k.split(".")[1].isdigit() else 0,
+    )
+    if head_keys:
+        pred_len = state_dict[head_keys[-1]].shape[0]
     else:
         pred_len = 8  # fallback
 

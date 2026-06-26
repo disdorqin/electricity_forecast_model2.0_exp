@@ -2704,8 +2704,16 @@ def save_segment_checkpoint(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{task}_{segment_name}.ckpt"
     path = ckpt_dir / fname
+    # Extract pred_len from the model's last Linear layer in head
+    _model = bundle["model"]
+    _pred_len = 8  # fallback
+    for _layer in reversed(list(_model.modules())):
+        if isinstance(_layer, torch.nn.Linear):
+            _pred_len = _layer.out_features
+            break
+
     torch.save({
-        "model_state_dict": bundle["model"].state_dict(),
+        "model_state_dict": _model.state_dict(),
         "past_scaler_mean": bundle["past_scaler"].mean_.tolist(),
         "past_scaler_scale": bundle["past_scaler"].scale_.tolist(),
         "future_scaler_mean": bundle["future_scaler"].mean_.tolist(),
@@ -2719,6 +2727,7 @@ def save_segment_checkpoint(
         "scales": cfg.scales,
         "dropout": cfg.dropout,
         "seq_len": cfg.seq_len,
+        "pred_len": _pred_len,
     }, str(path))
     return str(path)
 
@@ -2759,24 +2768,23 @@ def load_segment_checkpoint(
     # Reconstruct model — need to know input dims from scalers
     past_dim = past_scaler.n_features_in_
     future_dim = future_scaler.n_features_in_
-    # pred_len is determined by the segment, but for model construction we use a default
-    # The actual pred_len is set by the segment; we use seq_len as a proxy
-    # For TimeMixer, pred_len is always the segment length which is embedded in the head
-    # We need to figure out pred_len from the model state dict
     state_dict = ckpt["model_state_dict"]
-    # Find pred_len from the LAST head layer weight (final output projection).
-    # TimeMixer head has multiple Linear layers (head.0, head.2, head.4, head.7...).
-    # head.0 is intermediate (shape[0]=hidden_dim*(scales+1)=256), NOT pred_len.
-    # head.7 is the final output (shape[0]=pred_len=8 for a segment).
-    # Must sort by head index and pick head_keys[-1], not head_keys[0].
-    head_keys = sorted(
-        [k for k in state_dict if k.startswith("head.") and "weight" in k],
-        key=lambda k: int(k.split(".")[1]) if k.split(".")[1].isdigit() else 0,
-    )
-    if head_keys:
-        pred_len = state_dict[head_keys[-1]].shape[0]
-    else:
-        pred_len = 8  # fallback
+
+    # pred_len: prefer explicit value saved in checkpoint (>= v2.1).
+    # Fallback: infer from state_dict, but only consider 2D (Linear) weights
+    # to avoid picking up LayerNorm 1D weights (shape[0]=hidden_dim*(scales+1)=256).
+    pred_len = ckpt.get("pred_len")
+    if pred_len is None:
+        head_2d = sorted(
+            [k for k in state_dict
+             if k.startswith("head.") and k.endswith(".weight")
+             and state_dict[k].dim() == 2],
+            key=lambda k: int(k.split(".")[1]),
+        )
+        if head_2d:
+            pred_len = state_dict[head_2d[-1]].shape[0]
+        else:
+            pred_len = 8  # ultimate fallback
 
     model = build_backbone(
         backbone_name=cfg.backbone,
@@ -2836,8 +2844,8 @@ def _online_update_segment(
 
     model.train()
     for _epoch in range(online_epochs):
-        for xb, fb, yb in loader:
-            xb, fb, yb = xb.to(device), fb.to(device), yb.to(device)
+        for batch in loader:
+            xb, fb, yb = batch[0].to(device), batch[1].to(device), batch[2].to(device)
             optimizer.zero_grad()
             pred = model(xb, fb)
             loss = loss_fn(pred, yb)

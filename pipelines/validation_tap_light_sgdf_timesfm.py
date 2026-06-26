@@ -118,7 +118,7 @@ def split_month_predictions_to_learner_folds(
 
     # Ensure date column exists
     date_col = None
-    for col in ("target_day", "business_day", "ds"):
+    for col in ("target_day", "business_day", "ds", "timestamp"):
         if col in df.columns:
             date_col = col
             break
@@ -132,7 +132,15 @@ def split_month_predictions_to_learner_folds(
         df["horizon_day"] = -1
         return df
 
-    parsed = pd.to_datetime(df[date_col], errors="coerce").dt.date
+    # Normalize date column name to 'ds' for downstream compatibility
+    if date_col != "ds":
+        if "ds" in df.columns:
+            # Already has ds, drop the duplicate date column
+            df = df.drop(columns=[date_col])
+        else:
+            df = df.rename(columns={date_col: "ds"})
+
+    parsed = pd.to_datetime(df["ds"], errors="coerce").dt.date
     df["tap_fold_id"] = parsed.map(lambda d: date_map.get(d, -1))
     df["learner_tap_fold_id"] = df["tap_fold_id"]
     df["age_block"] = df["tap_fold_id"].apply(lambda fid: 9 - fid if 0 <= fid <= 9 else -1)

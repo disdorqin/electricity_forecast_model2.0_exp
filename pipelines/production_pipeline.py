@@ -271,8 +271,11 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
 
                     if ckpt_result is not None and not ckpt_result.empty:
                         logger.info("  %s: buffered checkpoint inference OK (%d rows)", model_name, len(ckpt_result))
-                        ckpt_result.to_csv(pred_file, index=False)
-                        frames.append(ckpt_result)
+                        df = _normalize_real_forecast(
+                            ckpt_result, task=target, model_name=model_name, date_str=date_str,
+                        )
+                        df.to_csv(pred_file, index=False)
+                        frames.append(df)
                         continue
                     else:
                         logger.warning("  %s: checkpoint inference returned no data, falling back", model_name)

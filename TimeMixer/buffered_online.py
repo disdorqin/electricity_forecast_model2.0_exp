@@ -670,6 +670,7 @@ def predict_from_buffered_checkpoint(
 
     stitched_preds = []
     for segment_name, start_idx, end_idx in SEGMENTS:
+        logger.info("[predict_from_ckpt/%s] loading checkpoint for segment %s", task, segment_name)
         # Load checkpoint
         ckpt = load_segment_checkpoint(ckpt_dir / f"{cfg_task}_{segment_name}.ckpt", device, cfg)
 
@@ -678,25 +679,38 @@ def predict_from_buffered_checkpoint(
         else:
             tgt = segment_target_cols.get(segment_name, "realtime_price")
 
+        logger.info("[predict_from_ckpt/%s] building segment arrays for %s (inference_mode=True)", task, segment_name)
         test_arrays = build_segment_arrays(
             df, [target_day], tgt, cfg.seq_len,
             cutoff_hour, start_idx, end_idx,
             target_mode="direct",
+            inference_mode=True,
         )
         if len(test_arrays) == 5:
             test_past, test_future, _, test_baseline, _ = test_arrays
         else:
             test_past, test_future, _, test_baseline = test_arrays
 
+        logger.info("[predict_from_ckpt/%s] %s: past=%s, future=%s, baseline=%s",
+                    task, segment_name, test_past.shape, test_future.shape, test_baseline.shape)
         pred = predict_model(ckpt, test_past, test_future, device, cfg.batch_size)
+        logger.info("[predict_from_ckpt/%s] %s: pred.shape=%s", task, segment_name, pred.shape)
         stitched_preds.append((segment_name, start_idx, end_idx, pred, test_baseline))
 
     # Stitch into 24h
     day_pred = np.zeros(24, dtype=float)
     for seg_name, start, end, pred_arr, baseline in stitched_preds:
+        logger.info("[predict_from_ckpt/%s] %s: pred_arr.shape=%s, baseline.shape=%s, size=%d",
+                    task, seg_name, pred_arr.shape, baseline.shape, pred_arr.size)
+        if pred_arr.size == 0:
+            logger.warning("[predict_from_ckpt/%s] empty prediction for segment %s", task, seg_name)
+            return None
         if len(pred_arr.shape) == 2 and pred_arr.shape[0] == 1:
             pred_arr = pred_arr[0]
-        day_pred[start:end] = pred_arr + baseline[start:end]
+        if len(baseline.shape) == 2 and baseline.shape[0] == 1:
+            baseline = baseline[0]
+        seg_len = end - start
+        day_pred[start:end] = pred_arr[:seg_len] + baseline[:seg_len]
 
     # Build output DataFrame
     created_at = datetime.now().isoformat()
@@ -710,7 +724,12 @@ def predict_from_buffered_checkpoint(
         else:
             period = "17_24"
 
-        ds = target_day + pd.Timedelta(hours=hour)
+        # Electricity market convention: hour 24 of day D = D+1 00:00:00
+        # hour 0 → hb=24 → timestamp should be target_day + 1 day
+        if hour == 0:
+            ds = target_day + pd.Timedelta(days=1)
+        else:
+            ds = target_day + pd.Timedelta(hours=hour)
         rows.append({
             "task": task,
             "model_name": "timemixer",

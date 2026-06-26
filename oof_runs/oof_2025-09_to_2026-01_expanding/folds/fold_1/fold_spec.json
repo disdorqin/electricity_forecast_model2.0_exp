@@ -1,0 +1,9 @@
+{
+  "fold_id": 1,
+  "train_start": "2023-01-01",
+  "train_end": "2025-09-30",
+  "test_start": "2025-10-01",
+  "test_end": "2025-10-31",
+  "target_month": "2025-10",
+  "is_expanding": true
+}

@@ -150,6 +150,8 @@ def validate_weights_csv(
 
 def validate_run_manifest(
     manifest_path: Path,
+    *,
+    tasks: list[str] | None = None,
 ) -> list[tuple[bool, str]]:
     """Validate run_manifest.json exists and has required steps."""
     results = []
@@ -161,15 +163,26 @@ def validate_run_manifest(
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    results.append(_check("predict_date" in manifest, "predict_date in manifest"))
+    results.append(_check("predict_date" in manifest or "date" in manifest, "predict_date in manifest"))
     results.append(_check("steps" in manifest, "steps in manifest"))
 
     if "steps" in manifest:
-        for step_name in ["validation_tap", "real_forecast", "learner", "fusion", "final_outputs"]:
-            results.append(_check(
-                step_name in manifest["steps"],
-                f"step '{step_name}' recorded in manifest"
-            ))
+        steps = manifest["steps"]
+        if tasks is None:
+            tasks = ["dayahead", "realtime"]
+        # Check for target-prefixed step names (e.g., dayahead_validation)
+        for target in tasks:
+            for step_suffix in ["validation", "forecast", "learner", "fusion"]:
+                step_name = f"{target}_{step_suffix}"
+                results.append(_check(
+                    step_name in steps,
+                    f"step '{step_name}' recorded in manifest"
+                ))
+        # Also check for final_outputs
+        results.append(_check(
+            "final_outputs" in steps or any("final" in k for k in steps),
+            f"step 'final_outputs' recorded in manifest"
+        ))
 
     return results
 
@@ -202,7 +215,7 @@ def run_all_validations(
     all_results = []
 
     # Manifest
-    all_results.extend(validate_run_manifest(output_dir / "run_manifest.json"))
+    all_results.extend(validate_run_manifest(output_dir / "run_manifest.json", tasks=tasks))
 
     for target in tasks:
         target_dir = output_dir / target

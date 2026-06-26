@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
+
+# Must be set before any CUDA/torch initialization to allow deterministic algorithms with CuBLAS
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,7 +142,7 @@ def main() -> int:
             print(f"R3D-Tap-GEF {dt}: {status}")
             if warnings:
                 for w in warnings[:5]:
-                    print(f"  ⚠ {w}")
+                    print(f"  [WARN] {w}")
             if final:
                 for key, path in final.items():
                     print(f"  {key}: {path}")

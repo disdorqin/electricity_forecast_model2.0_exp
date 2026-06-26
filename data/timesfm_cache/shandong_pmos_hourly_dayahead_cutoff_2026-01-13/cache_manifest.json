@@ -1,0 +1,10 @@
+{
+  "cache_file": "data\\timesfm_cache\\shandong_pmos_hourly_dayahead_cutoff_2026-01-13\\predictions_2026-01-14_2026-01-16.csv",
+  "cutoff_data_path": "data\\timesfm_cache\\shandong_pmos_hourly_dayahead_cutoff_2026-01-13\\cutoff_safe_shandong_pmos_hourly.csv",
+  "cutoff_date": "2026-01-13",
+  "start_date": "2026-01-14",
+  "end_date": "2026-01-16",
+  "target": "dayahead",
+  "generated_at": "2026-06-25T23:17:17.151932",
+  "rows_masked": 0
+}

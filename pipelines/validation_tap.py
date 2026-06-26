@@ -524,7 +524,19 @@ def run_validation_tap(
 
     # Assemble tap long table
     if all_frames:
-        tap_df = pd.concat(all_frames, ignore_index=True)
+        try:
+            # Debug: check for duplicate columns in each frame
+            for i, frame in enumerate(all_frames):
+                dup_cols = [c for c in frame.columns if list(frame.columns).count(c) > 1]
+                if dup_cols:
+                    logger.error("Frame %d has duplicate columns: %s", i, dup_cols)
+                    logger.error("  Columns: %s", list(frame.columns))
+            tap_df = pd.concat(all_frames, ignore_index=True)
+        except Exception as exc:
+            logger.error("Failed to concat %d frames: %s", len(all_frames), exc)
+            for i, frame in enumerate(all_frames):
+                logger.error("Frame %d: shape=%s, cols=%s", i, frame.shape, list(frame.columns))
+            raise
 
         # P0-2: Fill y_true from raw data (TimeMixer/RT916 buffered output has NaN y_true)
         tap_df = fill_y_true_from_data(tap_df, data_path, target)

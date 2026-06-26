@@ -155,7 +155,12 @@ def _run_bgew_update(
             gate_per_ds = fold_data.drop_duplicates(subset=["ds"]).set_index("ds")["_sample_gate"]
 
         # Get y_true and gate values aligned by ds
-        truth = fold_data.drop_duplicates(subset=["ds"])[["ds", "y_true"]]
+        # P0-fix: dropna y_true first to avoid picking NaN row from drop_duplicates
+        truth = (
+            fold_data.dropna(subset=["y_true"])
+            .groupby("ds", as_index=False)["y_true"]
+            .first()
+        )
         y_true = truth["y_true"].values.astype(float)
         ds_vals = truth["ds"].values
         gate_vals = gate_per_ds.reindex(ds_vals).values.astype(float)
@@ -311,9 +316,11 @@ def _convex_refit(
         # Build aligned arrays for optimization
         # Pivot: rows = samples (ds), cols = models, values = y_pred
         all_ds = tap_df["ds"].unique()
+        # P0-fix: dropna y_true first to avoid picking NaN row
         y_true_map = (
-            tap_df.drop_duplicates(subset=["ds"])
-            .set_index("ds")["y_true"]
+            tap_df.dropna(subset=["y_true"])
+            .groupby("ds", as_index=True)["y_true"]
+            .first()
         )
 
         model_pred_maps: dict[str, pd.Series] = {}
@@ -611,8 +618,16 @@ def run_r3d_tap_gef(
             values="y_pred",
             aggfunc="first",
         )
-        truth = group_df.drop_duplicates(subset=["ds"]).set_index("ds")["y_true"]
-        gate = group_df.drop_duplicates(subset=["ds"]).set_index("ds")["age_block"]
+        # P0-fix: dropna y_true first to avoid picking NaN row from drop_duplicates
+        truth = (
+            group_df.dropna(subset=["y_true"])
+            .groupby("ds", as_index=True)["y_true"]
+            .first()
+        )
+        gate = (
+            group_df.drop_duplicates(subset=["ds"])
+            .set_index("ds")["age_block"]
+        )
         gate = gate.apply(lambda a: np.exp(-a / tau_block))
 
         y_fused = np.zeros(len(wide))

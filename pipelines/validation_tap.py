@@ -365,7 +365,7 @@ def run_validation_tap(
             except Exception as exc2:
                 logger.error("    %s: single_train_range fallback exception: %s", model_name, exc2)
 
-    # ── 2. Inference models (timesfm): 30 daily cutoff inference ─────
+    # ── 2. Inference models (timesfm): daily or block inference ─────
     # Import once at module level for efficiency
     from pipelines.validation_tap_light_sgdf_timesfm import (
         run_timesfm_daily_validation_tap,
@@ -374,6 +374,7 @@ def run_validation_tap(
         save_runtime_report,
     )
     all_runtime_rows: list[dict] = []
+    timesfm_mode = kwargs.get("timesfm_inference_mode", "daily")
 
     for model_name in inference_models:
         adapter_cls = ADAPTER_REGISTRY.get(model_name)
@@ -385,40 +386,121 @@ def run_validation_tap(
             logger.info("%s does not support %s", model_name, target)
             continue
 
-        logger.info("  [inference] %s: 30 daily cutoff inference", model_name)
+        if timesfm_mode == "block":
+            # Block mode: single inference for full 30-day range, no daily cutoff
+            logger.info("  [inference] %s: block mode (full 30-day range)", model_name)
+            from TimesFM.infer import predict_price_for_range
+            from datetime import timedelta as _td
 
-        combined_df, runtime_rows = run_timesfm_daily_validation_tap(
-            predict_date=predict_date,
-            target=target,
-            data_path=data_path,
-            output_dir=output_dir,
-            force=force,
-            segment_count=kwargs.get("segment_count", 3),
-            seed=kwargs.get("seed", 42),
-            deterministic=kwargs.get("deterministic", True),
-        )
+            D = pd.Timestamp(predict_date).date()
+            range_start = (D - _td(days=30)).isoformat()
+            range_end = (D - _td(days=1)).isoformat()
 
-        if not combined_df.empty:
-            tap_df = normalize_block_predictions_to_tap(
-                combined_df, predict_date=predict_date,
-                task=target, model_name=model_name,
-            )
-            save_per_fold_predictions(tap_df, folds_dir, model_name)
-            all_frames.append(tap_df)
+            block_dir = output_dir / "model_blocks" / "timesfm"
+            block_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = block_dir / f"block_{target}_{predict_date}_full30.csv"
 
-            for fold_id in range(TAP_FOLDS):
-                fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
-                fold_results.append({
-                    "fold_id": fold_id, "model_name": model_name,
-                    "status": "complete" if fold_rows > 0 else "empty",
-                    "n_rows": fold_rows,
-                })
-            logger.info("    %s: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+            if _file_nonempty(cache_file) and not force:
+                logger.info("  [timesfm_block] cache hit: %s", cache_file)
+                combined_df = pd.read_csv(cache_file)
+                runtime_rows = [{
+                    "model_name": model_name, "target": target,
+                    "resource": "timesfm", "tap_strategy": "direct_inference_block",
+                    "model_update_block_id": "full30", "learner_tap_fold_id": None,
+                    "runtime_seconds": 0, "cache_hit": True,
+                    "status": "cached", "error_message": "",
+                }]
+            else:
+                t0 = __import__("time").monotonic()
+                try:
+                    combined_df = predict_price_for_range(
+                        data_path=data_path,
+                        start_date=range_start,
+                        end_date=range_end,
+                        target=target,
+                        segment_count=kwargs.get("segment_count", 3),
+                        seed=kwargs.get("seed", 42),
+                        deterministic=kwargs.get("deterministic", True),
+                    )
+                    if combined_df is not None and not combined_df.empty:
+                        combined_df["model_name"] = model_name
+                        combined_df["task"] = target
+                        combined_df["tap_source"] = "direct_inference_block"
+                        combined_df["source_confidence"] = 0.85
+                        combined_df.to_csv(cache_file, index=False)
+                    else:
+                        combined_df = pd.DataFrame()
+                        logger.error("  [timesfm_block] empty predictions")
+                except Exception as exc:
+                    logger.error("  [timesfm_block] failed: %s", exc)
+                    combined_df = pd.DataFrame()
+                elapsed = __import__("time").monotonic() - t0
+                runtime_rows = [{
+                    "model_name": model_name, "target": target,
+                    "resource": "timesfm", "tap_strategy": "direct_inference_block",
+                    "model_update_block_id": "full30", "learner_tap_fold_id": None,
+                    "runtime_seconds": round(elapsed, 1), "cache_hit": False,
+                    "status": "complete" if not combined_df.empty else "failed",
+                    "error_message": "" if not combined_df.empty else "empty predictions",
+                }]
+
+            if not combined_df.empty:
+                tap_df = normalize_block_predictions_to_tap(
+                    combined_df, predict_date=predict_date,
+                    task=target, model_name=model_name,
+                )
+                save_per_fold_predictions(tap_df, folds_dir, model_name)
+                all_frames.append(tap_df)
+
+                for fold_id in range(TAP_FOLDS):
+                    fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
+                    fold_results.append({
+                        "fold_id": fold_id, "model_name": model_name,
+                        "status": "complete" if fold_rows > 0 else "empty",
+                        "n_rows": fold_rows,
+                    })
+                logger.info("    %s block: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+            else:
+                logger.error("    %s block: NO predictions generated", model_name)
+                fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
+            all_runtime_rows.extend(runtime_rows)
+
         else:
-            logger.error("    %s: NO predictions generated", model_name)
-            fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
+            # Daily mode (default): 30 daily cutoff inference with per-day fallback
+            logger.info("  [inference] %s: 30 daily cutoff inference", model_name)
 
-        all_runtime_rows.extend(runtime_rows)
+            combined_df, runtime_rows = run_timesfm_daily_validation_tap(
+                predict_date=predict_date,
+                target=target,
+                data_path=data_path,
+                output_dir=output_dir,
+                force=force,
+                segment_count=kwargs.get("segment_count", 3),
+                seed=kwargs.get("seed", 42),
+                deterministic=kwargs.get("deterministic", True),
+            )
+
+            if not combined_df.empty:
+                tap_df = normalize_block_predictions_to_tap(
+                    combined_df, predict_date=predict_date,
+                    task=target, model_name=model_name,
+                )
+                save_per_fold_predictions(tap_df, folds_dir, model_name)
+                all_frames.append(tap_df)
+
+                for fold_id in range(TAP_FOLDS):
+                    fold_rows = len(tap_df[tap_df["tap_fold_id"] == fold_id])
+                    fold_results.append({
+                        "fold_id": fold_id, "model_name": model_name,
+                        "status": "complete" if fold_rows > 0 else "empty",
+                        "n_rows": fold_rows,
+                    })
+                logger.info("    %s: %d rows across %d folds", model_name, len(tap_df), TAP_FOLDS)
+            else:
+                logger.error("    %s: NO predictions generated", model_name)
+                fold_results.append({"model_name": model_name, "status": "failed", "error": "No predictions"})
+
+            all_runtime_rows.extend(runtime_rows)
 
     # ── 3. Rolling models (lightgbm): 3x10 true rolling ──────────────
     from pipelines.validation_tap_light_sgdf_timesfm import (
@@ -1031,8 +1113,14 @@ def fill_y_true_from_data(
     pred_df: pd.DataFrame,
     data_path: str,
     task: str,
+    *,
+    allow_low_ytrue: bool = False,
 ) -> pd.DataFrame:
-    """Fill y_true from raw data by exact ds merge.
+    """Fill y_true from raw data by business_day + hour_business merge.
+
+    Handles Chinese column names in raw CSV (时刻, 日前电价, 实时电价, etc.).
+    Uses business_day + hour_business as merge key to avoid timestamp ambiguity
+    (hour 24 of business_day D = timestamp D+1 00:00:00).
 
     Parameters
     ----------
@@ -1042,6 +1130,8 @@ def fill_y_true_from_data(
         Path to raw data CSV.
     task : str
         "dayahead" → day_ahead_clearing_price, "realtime" → realtime_price.
+    allow_low_ytrue : bool
+        If False (default), log error when any model has coverage < 95%.
 
     Returns
     -------
@@ -1050,27 +1140,95 @@ def fill_y_true_from_data(
     """
     df = pred_df.copy()
 
-    target_col = "day_ahead_clearing_price" if task == "dayahead" else "realtime_price"
+    # Chinese → English column name mapping
+    _CN_RENAME = {
+        "时刻": "ds",
+        "日前电价": "day_ahead_clearing_price",
+        "日前出清价": "day_ahead_clearing_price",
+        "日前统一出清价格": "day_ahead_clearing_price",
+        "dayahead_price": "day_ahead_clearing_price",
+        "day_ahead_price": "day_ahead_clearing_price",
+        "实时电价": "realtime_price",
+        "实时出清价": "realtime_price",
+        "实时统一出清价格": "realtime_price",
+        "real_time_clearing_price": "realtime_price",
+    }
 
-    try:
+    # Target column candidates per task
+    _TARGET_CANDIDATES = {
+        "dayahead": ["day_ahead_clearing_price"],
+        "realtime": ["realtime_price"],
+    }
+
+    # 1. Read raw data with encoding fallback
+    raw = None
+    for enc in ("utf-8", "gbk", "gb18030"):
         try:
-            raw = pd.read_csv(data_path, encoding="utf-8", parse_dates=["ds"])
+            raw = pd.read_csv(data_path, encoding=enc)
+            break
         except (UnicodeDecodeError, LookupError):
-            raw = pd.read_csv(data_path, encoding="gbk", parse_dates=["ds"])
-    except Exception:
+            continue
+    if raw is None:
         logger.warning("fill_y_true: cannot read %s", data_path)
         return df
 
-    if "ds" not in raw.columns or target_col not in raw.columns:
-        logger.warning("fill_y_true: missing ds or %s in raw data", target_col)
+    # 2. Rename Chinese columns to English
+    raw.rename(columns={c: _CN_RENAME.get(c, c) for c in raw.columns}, inplace=True)
+
+    # 3. Parse ds and compute business_day + hour_business
+    if "ds" not in raw.columns:
+        logger.warning("fill_y_true: no 'ds' (or '时刻') column in raw data after rename. Columns: %s", list(raw.columns))
         return df
 
-    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
     raw["ds"] = pd.to_datetime(raw["ds"], errors="coerce")
 
-    # Left merge: keep all predictions, fill y_true where available
-    raw_subset = raw[["ds", target_col]].rename(columns={target_col: "_y_true_filled"})
-    merged = df.merge(raw_subset, on="ds", how="left")
+    # Determine target column
+    target_col = None
+    for candidate in _TARGET_CANDIDATES.get(task, []):
+        if candidate in raw.columns:
+            target_col = candidate
+            break
+    if target_col is None:
+        logger.warning("fill_y_true: no target column for task '%s' in raw data. Columns: %s", task, list(raw.columns))
+        return df
+
+    # Compute business_day and hour_business from raw ds
+    raw["_biz_day"] = raw["ds"].apply(
+        lambda t: (t - pd.Timedelta(days=1)).date() if pd.notna(t) and t.hour == 0 else (t.date() if pd.notna(t) else None)
+    )
+    raw["_hour_bus"] = raw["ds"].apply(
+        lambda t: 24 if pd.notna(t) and t.hour == 0 else (t.hour if pd.notna(t) else None)
+    )
+
+    # Build truth table: one row per (business_day, hour_business)
+    truth = raw[["_biz_day", "_hour_bus", target_col]].dropna(subset=[target_col])
+    # Ensure _hour_bus is int for merge consistency
+    truth["_hour_bus"] = truth["_hour_bus"].fillna(-1).astype(int)
+    truth = truth.drop_duplicates(subset=["_biz_day", "_hour_bus"], keep="last")
+    truth.rename(columns={
+        "_biz_day": "_merge_biz_day",
+        "_hour_bus": "_merge_hour_bus",
+        target_col: "_y_true_filled",
+    }, inplace=True)
+
+    # 4. Compute business_day + hour_business on prediction side
+    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+    if "business_day" not in df.columns:
+        df["business_day"] = df["ds"].apply(
+            lambda t: (t - pd.Timedelta(days=1)).date() if pd.notna(t) and t.hour == 0 else (t.date() if pd.notna(t) else None)
+        )
+    if "hour_business" not in df.columns:
+        df["hour_business"] = df["ds"].apply(
+            lambda t: 24 if pd.notna(t) and t.hour == 0 else (t.hour if pd.notna(t) else None)
+        )
+
+    df["_merge_biz_day"] = pd.to_datetime(df["business_day"], errors="coerce").dt.date
+    # Ensure hour_business is int for merge (fill NaN with -1 sentinel, convert, then restore)
+    _hb_fill = df["hour_business"].fillna(-1).astype(int)
+    df["_merge_hour_bus"] = _hb_fill
+
+    # 5. Left merge on business_day + hour_business
+    merged = df.merge(truth, on=["_merge_biz_day", "_merge_hour_bus"], how="left")
 
     # Only fill where y_true is NaN
     if "y_true" not in merged.columns:
@@ -1080,16 +1238,29 @@ def fill_y_true_from_data(
     nan_after = merged["y_true"].isna().sum()
     filled = nan_before - nan_after
 
-    merged.drop(columns=["_y_true_filled"], inplace=True)
+    merged.drop(columns=["_y_true_filled", "_merge_biz_day", "_merge_hour_bus"], inplace=True, errors="ignore")
 
     coverage = 1.0 - nan_after / max(len(merged), 1)
-    if coverage < 0.5:
-        logger.warning(
-            "fill_y_true: LOW coverage %.1f%% for %s (%d/%d NaN remain)",
-            coverage * 100, task, nan_after, len(merged),
-        )
-
     logger.info("fill_y_true: %s filled %d/%d NaN (coverage %.1f%%)", task, filled, nan_before, coverage * 100)
+
+    # 6. Hard check: per-model coverage
+    if "model_name" in merged.columns:
+        for mdl in merged["model_name"].unique():
+            mdl_df = merged[merged["model_name"] == mdl]
+            mdl_valid = mdl_df["y_true"].notna().sum()
+            mdl_total = len(mdl_df)
+            mdl_pct = 100.0 * mdl_valid / mdl_total if mdl_total > 0 else 0.0
+            if mdl_pct < 95.0 and not allow_low_ytrue:
+                logger.error(
+                    "fill_y_true: model '%s' y_true coverage %.1f%% < 95%% (%d/%d) — pass --allow-low-ytrue to override",
+                    mdl, mdl_pct, mdl_valid, mdl_total,
+                )
+            elif mdl_pct < 95.0:
+                logger.warning(
+                    "fill_y_true: model '%s' y_true coverage %.1f%% < 95%% (allowed by flag)",
+                    mdl, mdl_pct,
+                )
+
     return merged
 
 

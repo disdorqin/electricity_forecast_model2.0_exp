@@ -182,7 +182,7 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
 
     # Respect --models parameter
     user_models = getattr(args, "models", None)
-    if user_models:
+    if user_models and user_models not in ("all", ""):
         user_set = set(m.strip() for m in user_models.split(","))
         models = [m for m in models if m in user_set]
         if not models:

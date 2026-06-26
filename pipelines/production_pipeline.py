@@ -180,6 +180,16 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
     date_str = manifest["date"]
     models = FORMAL_MODELS_BY_TASK[target]
 
+    # Respect --models parameter
+    user_models = getattr(args, "models", None)
+    if user_models:
+        user_set = set(m.strip() for m in user_models.split(","))
+        models = [m for m in models if m in user_set]
+        if not models:
+            logger.warning("  No matching models for %s after filtering by --models=%s", target, user_models)
+        else:
+            logger.info("  --models=%s -> %s models: %s", user_models, target, models)
+
     # Fast dev: limit to models that have validation tap data
     fast_dev = getattr(args, "fast_dev_run", False)
     if fast_dev:

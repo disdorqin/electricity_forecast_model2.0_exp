@@ -304,9 +304,9 @@ def run_validation_tap(
                     fold_id=fold_id, fold_info=fold_info,
                     predict_date=predict_date,
                 )
-                fold_df["tap_source"] = "online_update"
-                fold_df["source_confidence"] = 0.95
-                fold_df["checkpoint_path"] = str(checkpoint_dir)
+                fold_df["tap_source"] = fold_df.get("tap_source", "online_update")
+                fold_df["source_confidence"] = fold_df.get("source_confidence", 0.95)
+                fold_df["checkpoint_path"] = fold_df.get("checkpoint_path", str(checkpoint_dir))
 
                 fold_df.to_csv(pred_file, index=False)
                 all_frames.append(fold_df)
@@ -622,9 +622,9 @@ def _run_online_per_fold(
                 fold_id=fold_id, fold_info=fold_info,
                 predict_date=kwargs.get("predict_date", ""),
             )
-            df["tap_source"] = "online_update"
-            df["source_confidence"] = 0.95
-            df["checkpoint_path"] = str(checkpoint_dir)
+            df["tap_source"] = df.get("tap_source", "online_update")
+            df["source_confidence"] = df.get("source_confidence", 0.95)
+            df["checkpoint_path"] = df.get("checkpoint_path", str(checkpoint_dir))
 
             df.to_csv(pred_file, index=False)
             all_frames.append(df)

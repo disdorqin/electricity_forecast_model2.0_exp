@@ -58,14 +58,59 @@ def high_price_mae(
     return float(np.mean(np.abs(y_true[mask] - y_pred[mask])))
 
 
+def weighted_normalized_mae(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_weights: np.ndarray,
+    eps: float = 1e-6,
+) -> float:
+    """MAE normalized by median(|y_true|), weighted by sample_weights."""
+    mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    if mask.sum() == 0:
+        return float("nan")
+    yt, yp, sw = y_true[mask], y_pred[mask], sample_weights[mask]
+    denom = max(float(np.median(np.abs(yt))), eps)
+    errors = np.abs(yt - yp) / denom
+    if sw.sum() < 1e-9:
+        return float(np.mean(errors))
+    return float(np.average(errors, weights=sw))
+
+
+def weighted_peak_mae(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    sample_weights: np.ndarray,
+    q: float = 0.90,
+) -> float:
+    """Weighted MAE on samples where y_true >= q-th quantile."""
+    mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    if mask.sum() == 0:
+        return float("nan")
+    yt, yp, sw = y_true[mask], y_pred[mask], sample_weights[mask]
+    threshold = np.quantile(yt, q)
+    peak_mask = yt >= threshold
+    if peak_mask.sum() == 0:
+        return float("nan")
+    errors = np.abs(yt[peak_mask] - yp[peak_mask])
+    sw_peak = sw[peak_mask]
+    if sw_peak.sum() < 1e-9:
+        return float(np.mean(errors))
+    return float(np.average(errors, weights=sw_peak))
+
+
 def compute_all_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    sample_weights: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Compute full metric suite for a single (task, period) group."""
     mask = ~(np.isnan(y_true) | np.isnan(y_pred))
     yt = y_true[mask]
     yp = y_pred[mask]
+    if sample_weights is not None:
+        sw = np.asarray(sample_weights, dtype=float)[mask]
+    else:
+        sw = np.ones(int(mask.sum()), dtype=float)
     if len(yt) == 0:
         return {
             "MAE": float("nan"),
@@ -75,6 +120,8 @@ def compute_all_metrics(
             "bias_median": float("nan"),
             "q90_high_price_MAE": float("nan"),
             "q95_high_price_MAE": float("nan"),
+            "weighted_norm_MAE": float("nan"),
+            "weighted_peak_MAE": float("nan"),
             "n": 0,
         }
     return {
@@ -85,6 +132,8 @@ def compute_all_metrics(
         "bias_median": bias_median(yt, yp),
         "q90_high_price_MAE": high_price_mae(yt, yp, 0.90),
         "q95_high_price_MAE": high_price_mae(yt, yp, 0.95),
+        "weighted_norm_MAE": weighted_normalized_mae(yt, yp, sw),
+        "weighted_peak_MAE": weighted_peak_mae(yt, yp, sw),
         "n": int(mask.sum()),
     }
 

@@ -86,6 +86,27 @@ def build_parser() -> argparse.ArgumentParser:
     r3d_group.add_argument("--tau-horizon", type=float, default=2.0, help="Horizon gate decay for prediction day offset (default: 2.0)")
     r3d_group.add_argument("--weight-floor", type=float, default=0.03, help="Minimum weight for any model (default: 0.03)")
     r3d_group.add_argument("--lambda-refit", type=float, default=0.05, help="Regularization strength for convex refit (default: 0.05)")
+    r3d_group.add_argument("--tau-days", type=float, default=14.0,
+        help="Day age gate decay constant (default: 14.0)")
+    r3d_group.add_argument("--evidence-prior", type=float, default=5.0,
+        help="Evidence prior for shrinkage (default: 5.0)")
+
+    # --- Online update parameters ---
+    online_group = parser.add_argument_group("Online Update Options")
+    online_group.add_argument("--timemixer-online-epochs", type=int, default=3,
+        help="TimeMixer online update epochs per block (default: 3)")
+    online_group.add_argument("--timemixer-online-lr", type=float, default=None,
+        help="TimeMixer online update LR (default: auto = base_lr * 0.1)")
+    online_group.add_argument("--rt916-online-epochs", type=int, default=3,
+        help="RT916 online update epochs per block (default: 3)")
+    online_group.add_argument("--rt916-online-lr", type=float, default=None,
+        help="RT916 online update LR (default: auto = base_lr * 0.1)")
+    online_group.add_argument("--timesfm-inference-mode", default="daily",
+        choices=["daily", "block"],
+        help="TimesFM inference mode (default: daily)")
+    online_group.add_argument("--sgdfnet-fold-strategy", default="auto",
+        choices=["10x3", "3x10", "auto"],
+        help="SGDFNet fold strategy (default: auto)")
 
     # --- Speed optimization ---
     speed_group = parser.add_argument_group("Speed Optimization Options")

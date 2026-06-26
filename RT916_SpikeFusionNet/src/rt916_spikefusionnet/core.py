@@ -4,6 +4,7 @@ import json
 import math
 import pickle
 import random
+import shutil
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -1206,8 +1207,432 @@ def run_joint_da_rt_daily_backtest(start_end_list=None, mod="all", asof_hour=15)
     return rt_result
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 2: Online Update — base_train + online_update per block
+# ══════════════════════════════════════════════════════════════════════════
 
 
+def online_update_single_period(
+    period_name,
+    update_df,
+    checkpoint_dir,
+    online_epochs=3,
+    online_lr=None,
+):
+    """对单个时段执行 online update（微调）。
 
+    关键：使用已有的 scaler（不重新 fit），仅用少量 epoch 微调模型。
+
+    Parameters
+    ----------
+    period_name : str
+        时段名称，如 "1-8点", "9-16点", "17-0点"。
+    update_df : pd.DataFrame
+        新数据（包含真实值），用于微调。
+    checkpoint_dir : str | Path
+        checkpoint 根目录，模型文件位于 {checkpoint_dir}/{period_name}/。
+    online_epochs : int
+        微调轮数，默认 3。
+    online_lr : float | None
+        微调学习率，默认 CONFIG["LR"] * 0.1。
+    """
+    ckpt_root = Path(checkpoint_dir) / period_name
+    pred_len = CONFIG["OUTPUT_LEN_LIST"]
+    seq_len = CONFIG["OUTPUT_LEN_LIST"] * CONFIG["INPUT_LEN_LIST"] + CONFIG["OUTPUT_LEN_LIST"]
+    model_filename = f"model_{CONFIG['INPUT_LEN_LIST'] + 1}天输出最后{pred_len}点.pth"
+
+    # ── 1. 加载已有 scaler（不 refit）──
+    scaler_x_path = ckpt_root / "scalar_input.pkl"
+    scaler_y_path = ckpt_root / "scalar_output.pkl"
+    with open(scaler_x_path, "rb") as f:
+        scaler_x = pickle.load(f)
+    with open(scaler_y_path, "rb") as f:
+        scaler_y = pickle.load(f)
+
+    # ── 2. 准备数据 ──
+    if CONFIG["OUTPUT"] == "日前电价":
+        update_df = enrich_period_local_features(
+            update_df, target_col=CONFIG["OUTPUT"], pred_len=pred_len
+        )
+
+    cols_for_model = list(
+        dict.fromkeys(CONFIG["HISTORY_INPUT"] + CONFIG["FUTURE_INPUT"] + [CONFIG["OUTPUT"]])
+    )
+    df = update_df[cols_for_model].interpolate(method="linear", limit_direction="forward").copy()
+
+    feature_cols = CONFIG["HISTORY_INPUT"] + CONFIG["FUTURE_INPUT"]
+    for col in feature_cols:
+        if df[col].dtype == object:
+            df[col] = df[col].astype(str).str.replace(" ", "").astype(float)
+
+    input_features = df[feature_cols].values
+    target_feature = df[[CONFIG["OUTPUT"]]].values
+
+    # 用已有 scaler transform（不 refit）
+    update_data_scaled = scaler_x.transform(input_features)
+    update_target_scaled = scaler_y.transform(target_feature)
+
+    # ── 3. 创建 DataLoader（step=1 以从短窗口获得更多样本）──
+    update_dataset = ElectricityDataset(
+        update_data_scaled,
+        update_target_scaled,
+        seq_len=seq_len,
+        pred_len=pred_len,
+        step=1,
+    )
+    if len(update_dataset) == 0:
+        print(f"  [Online Update] {period_name}: 数据不足，跳过更新")
+        return
+
+    use_cuda = torch.cuda.is_available()
+    _num_workers = 0  # online update 数据量小，单进程即可
+    _dl_kwargs = dict(num_workers=_num_workers, pin_memory=False)
+    update_loader = DataLoader(
+        update_dataset, batch_size=CONFIG["BATCH_SIZE"], shuffle=True, **_dl_kwargs
+    )
+
+    # ── 4. 构建模型并加载权重 ──
+    device = torch.device("cuda" if use_cuda else "cpu")
+    model = _build_model(len(CONFIG["HISTORY_INPUT"]), seq_len, pred_len, CONFIG)
+    model_path = ckpt_root / model_filename
+    model.load_state_dict(torch.load(str(model_path), map_location=device))
+    model.to(device)
+
+    # ── 5. 微调 ──
+    _lr = online_lr if online_lr is not None else CONFIG["LR"] * 0.1
+    optimizer = optim.AdamW(model.parameters(), lr=_lr, weight_decay=CONFIG["WEIGHT_DECAY"])
+    criterion = nn.HuberLoss(delta=50.0)
+
+    _use_amp = use_cuda and bool(int(os.getenv("OPTIM_AMP", "1")))
+    _amp_dtype = torch.bfloat16 if os.getenv("OPTIM_AMP_DTYPE", "bf16").lower() == "bf16" else torch.float16
+    _scaler = torch.amp.GradScaler("cuda") if (_use_amp and _amp_dtype == torch.float16) else None
+    _non_blocking = use_cuda and bool(int(os.getenv("OPTIM_NON_BLOCKING", "1")))
+
+    model.train()
+    for epoch in range(online_epochs):
+        epoch_loss = 0.0
+        n_batches = 0
+        for batch_x, batch_y in update_loader:
+            batch_x = batch_x.to(device, non_blocking=_non_blocking)
+            batch_y = batch_y.to(device, non_blocking=_non_blocking)
+
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=_amp_dtype, enabled=_use_amp):
+                loss = criterion(model(batch_x), batch_y)
+            if _scaler is not None:
+                _scaler.scale(loss).backward()
+                _scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                _scaler.step(optimizer)
+                _scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+
+        avg_loss = epoch_loss / max(1, n_batches)
+        print(f"  [Online Update] {period_name} epoch {epoch + 1}/{online_epochs}  loss={avg_loss:.6f}")
+
+    # ── 6. 保存更新后的模型 ──
+    model.eval()
+    torch.save(model.state_dict(), str(model_path))
+    print(f"  [Online Update] {period_name}: 模型已更新并保存 -> {model_path}")
+
+
+def run_online_walk_forward_rt916(
+    target,
+    df_raw,
+    fold_specs,
+    checkpoint_root,
+    online_epochs=3,
+    online_lr=None,
+):
+    """Online walk-forward 全流程编排。
+
+    流程:
+      1. Base train: 在 fold_specs[0].train_end 之前的数据上训练，保存 3 个时段的 checkpoint。
+      2. 对每个 fold (block 0..9):
+         a. 用当前 checkpoint 预测该 block
+         b. 用该 block 的真实值做 online update
+      3. 返回所有 block 的预测结果列表。
+
+    对于 RT（实时电价）目标:
+      必须先完成 DA（日前电价）预测，再将 DA 预测注入 RT 特征中。
+
+    Parameters
+    ----------
+    target : str
+        "日前电价" 或 "实时电价"。
+    df_raw : pd.DataFrame
+        已完成特征工程的原始数据。
+    fold_specs : list[FoldSpec]
+        fold 参数列表，每个 fold 定义 train_end / test_start / test_end。
+    checkpoint_root : str | Path
+        checkpoint 存储根目录。
+    online_epochs : int
+        每个 block 的 online update 轮数。
+    online_lr : float | None
+        online update 学习率。
+
+    Returns
+    -------
+    list[pd.DataFrame]
+        每个 fold 的预测 DataFrame。
+    """
+    from rolling_oof.contracts import FoldSpec  # local import to avoid circular
+
+    ckpt_root = Path(checkpoint_root)
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+    pred_len = CONFIG["OUTPUT_LEN_LIST"]
+    seq_len = CONFIG["OUTPUT_LEN_LIST"] * CONFIG["INPUT_LEN_LIST"] + CONFIG["OUTPUT_LEN_LIST"]
+    model_filename = f"model_{CONFIG['INPUT_LEN_LIST'] + 1}天输出最后{pred_len}点.pth"
+
+    df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
+
+    # ── Step 1: Base train ──
+    base_train_end = pd.Timestamp(fold_specs[0].train_end)
+    base_train_df = df_raw[df_raw["时刻"] <= base_train_end].copy()
+    print(f"\n{'=' * 60}")
+    print(f"[Online Walk-Forward] Base train: {len(base_train_df)} rows up to {base_train_end.date()}")
+    print(f"{'=' * 60}")
+
+    # 对 3 个时段分别训练
+    for period_name, period_data in _get_periods(base_train_df, "all"):
+        CONFIG["CURRENT_PERIOD_NAME"] = period_name
+        period_ckpt_dir = ckpt_root / period_name
+        period_ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n[Online Base Train] {period_name} ({len(period_data)} rows)")
+
+        # 调用现有 train_single_period 进行基础训练
+        # train_single_period 会将模型保存到 CONFIG["SAVE_ROOT_DIR"] 下
+        # 训练完成后，将模型文件和 scaler 复制到 checkpoint_root/{period_name}/
+        train_single_period(period_name, period_data)
+
+        # 找到训练输出目录
+        train_output_dir = os.path.join(
+            CONFIG["SAVE_ROOT_DIR"], f"TS{CONFIG['TRAIN_STEPS']}_{period_name}"
+        )
+
+        # 复制模型文件和 scaler 到 checkpoint 目录
+        src_model = os.path.join(train_output_dir, model_filename)
+        dst_model = str(period_ckpt_dir / model_filename)
+        if os.path.exists(src_model):
+            shutil.copy2(src_model, dst_model)
+        src_scalar_x = os.path.join(train_output_dir, "scalar_input.pkl")
+        dst_scalar_x = str(period_ckpt_dir / "scalar_input.pkl")
+        if os.path.exists(src_scalar_x):
+            shutil.copy2(src_scalar_x, dst_scalar_x)
+        src_scalar_y = os.path.join(train_output_dir, "scalar_output.pkl")
+        dst_scalar_y = str(period_ckpt_dir / "scalar_output.pkl")
+        if os.path.exists(src_scalar_y):
+            shutil.copy2(src_scalar_y, dst_scalar_y)
+
+        print(f"[Online Base Train] {period_name}: checkpoint -> {period_ckpt_dir}")
+
+    # ── Step 2: Block-by-block predict + online update ──
+    all_block_preds: list[pd.DataFrame] = []
+
+    for fold_spec in fold_specs:
+        block_id = fold_spec.fold_id
+        test_start = pd.Timestamp(fold_spec.test_start)
+        test_end = pd.Timestamp(fold_spec.test_end)
+
+        print(f"\n{'=' * 60}")
+        print(f"[Online Block {block_id}] predict {test_start.date()} ~ {test_end.date()}")
+        print(f"{'=' * 60}")
+
+        # 推理需要足够的上下文窗口
+        context_start = test_start - pd.Timedelta(days=CONFIG["INPUT_LEN_LIST"])
+        block_data = df_raw[
+            (df_raw["时刻"] >= context_start) & (df_raw["时刻"] <= test_end)
+        ].copy()
+
+        # 设置推理时间窗口
+        CONFIG["TEST_TOTAL_START_END_LIST"] = [str(test_start), str(test_end)]
+
+        # 对每个时段进行预测
+        block_predictions = {}
+        for period_name, period_data in _get_periods(block_data, "all"):
+            CONFIG["CURRENT_PERIOD_NAME"] = period_name
+            period_ckpt_dir = str(ckpt_root / period_name)
+
+            # 临时修改 SAVE_ROOT_DIR 使 inference_single_period 从 checkpoint 加载
+            _orig_save_root = CONFIG["SAVE_ROOT_DIR"]
+            # inference_single_period 加载路径: {SAVE_ROOT_DIR}/TS{TRAIN_STEPS}_{period_name}/
+            # 我们需要让路径指向 checkpoint_root/{period_name}/
+            # 通过创建一个符号链接或临时修改 CONFIG
+            _ts_dir_name = f"TS{CONFIG['TRAIN_STEPS']}_{period_name}"
+            _tmp_save_root = str(ckpt_root / "_tmp_inference")
+            _tmp_period_dir = os.path.join(_tmp_save_root, _ts_dir_name)
+            os.makedirs(_tmp_save_root, exist_ok=True)
+            # 创建符号链接（Windows 可能需要 junction 或 copy）
+            if os.path.exists(_tmp_period_dir):
+                shutil.rmtree(_tmp_period_dir)
+            try:
+                os.symlink(str(ckpt_root / period_name), _tmp_period_dir, target_is_directory=True)
+            except OSError:
+                # Windows fallback: 复制文件
+                shutil.copytree(str(ckpt_root / period_name), _tmp_period_dir)
+
+            CONFIG["SAVE_ROOT_DIR"] = _tmp_save_root
+
+            try:
+                pred_df = inference_single_period(period_name, period_data)
+                block_predictions[period_name] = pred_df
+            except Exception as e:
+                print(f"  [Online Block {block_id}] {period_name} 推理失败: {e}")
+                block_predictions[period_name] = pd.DataFrame()
+            finally:
+                CONFIG["SAVE_ROOT_DIR"] = _orig_save_root
+                # 清理临时目录
+                if os.path.exists(_tmp_period_dir):
+                    try:
+                        if os.path.islink(_tmp_period_dir):
+                            os.unlink(_tmp_period_dir)
+                        else:
+                            shutil.rmtree(_tmp_period_dir)
+                    except Exception:
+                        pass
+
+        # 合并所有时段的预测
+        valid_preds = [v for v in block_predictions.values() if v is not None and len(v) > 0]
+        if valid_preds:
+            merged_pred = pd.concat(valid_preds, ignore_index=False)
+            merged_pred = merged_pred.sort_values("时刻").reset_index(drop=True)
+            all_block_preds.append(merged_pred)
+        else:
+            print(f"  [Online Block {block_id}] 无有效预测结果")
+            all_block_preds.append(pd.DataFrame())
+
+        # ── Online update: 用该 block 的真实值微调 ──
+        # 获取 block 期间的真实数据（test_start ~ test_end）
+        update_data = df_raw[
+            (df_raw["时刻"] >= test_start) & (df_raw["时刻"] <= test_end)
+        ].copy()
+
+        if len(update_data) == 0:
+            print(f"  [Online Block {block_id}] 无真实值数据，跳过 online update")
+            continue
+
+        # 需要包含上下文窗口用于构造 dataset
+        update_data_with_context = df_raw[
+            (df_raw["时刻"] >= context_start) & (df_raw["时刻"] <= test_end)
+        ].copy()
+
+        print(f"\n[Online Block {block_id}] online update ({online_epochs} epochs, "
+              f"lr={online_lr or CONFIG['LR'] * 0.1})")
+
+        for period_name, period_data in _get_periods(update_data_with_context, "all"):
+            try:
+                online_update_single_period(
+                    period_name=period_name,
+                    update_df=period_data,
+                    checkpoint_dir=str(ckpt_root),
+                    online_epochs=online_epochs,
+                    online_lr=online_lr,
+                )
+            except Exception as e:
+                print(f"  [Online Block {block_id}] {period_name} online update 失败: {e}")
+
+    return all_block_preds
+
+
+def run_online_walk_forward_joint(
+    df_raw,
+    fold_specs,
+    checkpoint_root,
+    online_epochs=3,
+    online_lr=None,
+):
+    """联合 DA+RT online walk-forward。
+
+    流程:
+      1. 先对 DA（日前电价）执行 online walk-forward，得到 DA 预测。
+      2. 将 DA 预测注入 RT 数据中。
+      3. 对 RT（实时电价）执行 online walk-forward。
+
+    Returns
+    -------
+    dict with keys "da_predictions" and "rt_predictions", each a list of DataFrames.
+    """
+
+    # ── Step 1: DA online walk-forward ──
+    print("\n" + "=" * 60)
+    print("[Joint Online] Phase 1: DA (日前电价) online walk-forward")
+    print("=" * 60)
+
+    _update_config("日前电价", [
+        str(pd.Timestamp(fold_specs[0].test_start)),
+        str(pd.Timestamp(fold_specs[-1].test_end)),
+    ])
+    CONFIG["ENABLE_DA_LINKAGE"] = False
+
+    da_checkpoint_root = Path(checkpoint_root) / "da"
+    da_block_preds = run_online_walk_forward_rt916(
+        target="日前电价",
+        df_raw=df_raw.copy(),
+        fold_specs=fold_specs,
+        checkpoint_root=da_checkpoint_root,
+        online_epochs=online_epochs,
+        online_lr=online_lr,
+    )
+
+    # 合并 DA 预测
+    da_valid = [v for v in da_block_preds if v is not None and len(v) > 0]
+    if da_valid:
+        da_all = pd.concat(da_valid, ignore_index=True)
+        da_all = da_all.sort_values("时刻").drop_duplicates(subset=["时刻"], keep="last").reset_index(drop=True)
+    else:
+        print("[Joint Online] DA 预测为空，无法执行 RT 联动")
+        return {"da_predictions": [], "rt_predictions": []}
+
+    # ── Step 2: 将 DA 预测注入 RT 数据 ──
+    print("\n" + "=" * 60)
+    print("[Joint Online] Phase 2: 注入 DA 预测到 RT 数据")
+    print("=" * 60)
+
+    df_rt = df_raw.copy()
+    df_rt["时刻"] = pd.to_datetime(df_rt["时刻"])
+
+    # 将 DA 预测合并到 RT 数据中
+    da_inject = da_all[["时刻", "预测日前电价"]].rename(columns={"预测日前电价": "日前电价_injected"})
+    df_rt = df_rt.merge(da_inject, on="时刻", how="left")
+    # 用注入的 DA 预测替换原来的日前电价（仅在有注入值时）
+    mask = df_rt["日前电价_injected"].notna()
+    df_rt.loc[mask, "日前电价"] = df_rt.loc[mask, "日前电价_injected"]
+    df_rt = df_rt.drop(columns=["日前电价_injected"])
+
+    # ── Step 3: RT online walk-forward ──
+    print("\n" + "=" * 60)
+    print("[Joint Online] Phase 3: RT (实时电价) online walk-forward")
+    print("=" * 60)
+
+    _update_config("实时电价", [
+        str(pd.Timestamp(fold_specs[0].test_start)),
+        str(pd.Timestamp(fold_specs[-1].test_end)),
+    ])
+    if bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+        CONFIG["ENABLE_DA_LINKAGE"] = True
+        df_rt = enrich_da_linkage_features(df_rt, da_pred_series=None)
+    else:
+        CONFIG["ENABLE_DA_LINKAGE"] = False
+
+    rt_checkpoint_root = Path(checkpoint_root) / "rt"
+    rt_block_preds = run_online_walk_forward_rt916(
+        target="实时电价",
+        df_raw=df_rt,
+        fold_specs=fold_specs,
+        checkpoint_root=rt_checkpoint_root,
+        online_epochs=online_epochs,
+        online_lr=online_lr,
+    )
+
+    return {
+        "da_predictions": da_block_preds,
+        "rt_predictions": rt_block_preds,
+    }
 
 

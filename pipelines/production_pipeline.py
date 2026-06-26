@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -118,6 +119,14 @@ def _step1_validation_tap(args, ddir: Path, target: str, manifest: dict) -> Path
     if getattr(args, "skip_rt916_validation", False):
         extra_kwargs["skip_models"] = ["rt916"]
 
+    # New: pass online update parameters
+    extra_kwargs["timemixer_online_epochs"] = getattr(args, "timemixer_online_epochs", 3)
+    extra_kwargs["timemixer_online_lr"] = getattr(args, "timemixer_online_lr", None)
+    extra_kwargs["rt916_online_epochs"] = getattr(args, "rt916_online_epochs", 3)
+    extra_kwargs["rt916_online_lr"] = getattr(args, "rt916_online_lr", None)
+    extra_kwargs["timesfm_inference_mode"] = getattr(args, "timesfm_inference_mode", "daily")
+    extra_kwargs["sgdfnet_fold_strategy"] = getattr(args, "sgdfnet_fold_strategy", "auto")
+
     result_path = run_validation_tap(
         predict_date=date_str,
         target=target,
@@ -196,9 +205,18 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
         if target not in adapter.supported_tasks:
             continue
 
+        # For online models, check if checkpoint exists from validation tap
+        model_kwargs = dict(kwargs)
+        if model_name in ("timemixer", "rt916"):
+            checkpoint_dir = ddir / target / "validation" / f"{model_name}_checkpoints"
+            if checkpoint_dir.exists():
+                model_kwargs["rolling_mode"] = "online"
+                model_kwargs["checkpoint_dir"] = str(checkpoint_dir)
+                logger.info("  %s: using checkpoint from validation tap", model_name)
+
         try:
             result = adapter.fold_train_predict(
-                task=target, fold_spec=fs, data_path=args.data_path, **kwargs,
+                task=target, fold_spec=fs, data_path=args.data_path, **model_kwargs,
             )
 
             if not result.success or result.predictions_df is None:
@@ -282,6 +300,20 @@ def _normalize_real_forecast(raw_df, *, task, model_name, date_str):
 
 
 # ── Step 3: R3D-Tap-GEF Learner ─────────────────────────────────────
+def _load_previous_weights(ddir: Path, target: str) -> dict[str, float] | None:
+    """Try to load previous day's weights for evidence shrinkage prior."""
+    yesterday = (pd.Timestamp(ddir.name) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_weights = Path("outputs") / yesterday / target / "fused" / "weights.csv"
+    if yesterday_weights.exists() and yesterday_weights.stat().st_size > 0:
+        try:
+            df = pd.read_csv(yesterday_weights)
+            df = df[df["task"] == target] if "task" in df.columns else df
+            return dict(zip(df["model_name"], df["weight"]))
+        except Exception:
+            return None
+    return None
+
+
 def _step3_learner(args, ddir: Path, target: str, manifest: dict) -> Path:
     """Train the R3D-Tap-GEF learner on validation tap data."""
     from fusion.learners.r3d_tap_gef import run_r3d_tap_gef
@@ -308,9 +340,12 @@ def _step3_learner(args, ddir: Path, target: str, manifest: dict) -> Path:
         tap_df,
         tau_block=getattr(args, "tau_block", 3.0),
         tau_horizon=getattr(args, "tau_horizon", 2.0),
+        tau_days=getattr(args, "tau_days", 14.0),
         eta=getattr(args, "eta", 0.8),
         weight_floor=getattr(args, "weight_floor", 0.03),
         lambda_refit=getattr(args, "lambda_refit", 0.05),
+        evidence_prior=getattr(args, "evidence_prior", 5.0),
+        previous_weights=_load_previous_weights(ddir, target),
     )
 
     output.weights.to_csv(fused_dir / "weights.csv", index=False)
@@ -323,9 +358,11 @@ def _step3_learner(args, ddir: Path, target: str, manifest: dict) -> Path:
         "learner_mode": "r3d_tap_gef",
         "tau_block": getattr(args, "tau_block", 3.0),
         "tau_horizon": getattr(args, "tau_horizon", 2.0),
+        "tau_days": getattr(args, "tau_days", 14.0),
         "eta": getattr(args, "eta", 0.8),
         "weight_floor": getattr(args, "weight_floor", 0.03),
         "lambda_refit": getattr(args, "lambda_refit", 0.05),
+        "evidence_prior": getattr(args, "evidence_prior", 5.0),
         "warnings": output.manifest.get("warnings", []),
         "generated_at": datetime.now().isoformat(),
     }
@@ -705,6 +742,7 @@ def run_production_for_date(args, dt: str) -> dict:
         "dayahead_models": FORMAL_DAYAHEAD_MODELS,
         "realtime_models": FORMAL_REALTIME_MODELS,
         "steps": {},
+        "timing": {},
         "final_outputs": {},
         "warnings": [],
     }
@@ -719,7 +757,9 @@ def run_production_for_date(args, dt: str) -> dict:
             logger.info("--- %s ---", target)
 
             try:
+                t_step = time.time()
                 _step1_validation_tap(args, ddir, target, manifest)
+                manifest["timing"][f"{target}_validation_tap_seconds"] = round(time.time() - t_step, 1)
             except Exception as exc:
                 logger.error("Validation tap failed for %s: %s", target, exc)
                 manifest["status"] = "failed"
@@ -727,7 +767,9 @@ def run_production_for_date(args, dt: str) -> dict:
                 return manifest
 
             try:
+                t_step = time.time()
                 _step2_real_forecast(args, ddir, target, manifest)
+                manifest["timing"][f"{target}_real_forecast_seconds"] = round(time.time() - t_step, 1)
             except Exception as exc:
                 logger.error("Real forecast failed for %s: %s", target, exc)
                 manifest["status"] = "failed"
@@ -735,7 +777,9 @@ def run_production_for_date(args, dt: str) -> dict:
                 return manifest
 
             try:
+                t_step = time.time()
                 _step3_learner(args, ddir, target, manifest)
+                manifest["timing"][f"{target}_learner_seconds"] = round(time.time() - t_step, 1)
             except Exception as exc:
                 logger.error("Learner failed for %s: %s", target, exc)
                 manifest["status"] = "failed"
@@ -743,7 +787,9 @@ def run_production_for_date(args, dt: str) -> dict:
                 return manifest
 
             try:
+                t_step = time.time()
                 _step4_fusion(args, ddir, target, manifest)
+                manifest["timing"][f"{target}_fusion_seconds"] = round(time.time() - t_step, 1)
             except Exception as exc:
                 logger.error("Fusion failed for %s: %s", target, exc)
                 manifest["status"] = "failed"
@@ -751,13 +797,42 @@ def run_production_for_date(args, dt: str) -> dict:
                 return manifest
 
         if "realtime" in targets:
+            t_step = time.time()
             _step5_classifier(args, ddir, manifest)
+            manifest["timing"]["classifier_seconds"] = round(time.time() - t_step, 1)
 
+        t_step = time.time()
         _step6_final_outputs(ddir, manifest)
+        manifest["timing"]["final_outputs_seconds"] = round(time.time() - t_step, 1)
+
+        t_step = time.time()
         _run_output_validation(ddir, targets, manifest)
+        manifest["timing"]["output_validation_seconds"] = round(time.time() - t_step, 1)
 
         manifest["finished_at"] = datetime.now().isoformat()
+
+        # Generate runtime report
+        timing = manifest.get("timing", {})
+        total_seconds = sum(v for v in timing.values() if isinstance(v, (int, float)))
+        manifest["timing"]["total_seconds"] = round(total_seconds, 1)
+
+        # Per-model timing breakdown
+        for target in targets:
+            for model_name in FORMAL_MODELS_BY_TASK[target]:
+                key = f"{target}_{model_name}_seconds"
+                if key not in timing:
+                    timing[key] = 0.0
+
         _save_manifest(ddir, manifest)
+
+        # Print summary
+        logger.info("=" * 60)
+        logger.info("RUNTIME SUMMARY for %s:", dt)
+        logger.info("  Total: %.1f seconds (%.1f minutes)", total_seconds, total_seconds / 60)
+        for key, val in sorted(timing.items()):
+            if key.endswith("_seconds") and key != "total_seconds":
+                logger.info("  %s: %.1f s", key, val)
+        logger.info("=" * 60)
 
         logger.info("R3D-Tap-GEF %s: %s", manifest["status"], dt)
         return manifest

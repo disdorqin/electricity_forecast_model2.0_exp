@@ -98,6 +98,12 @@ class RunConfig:
     peak_solar_ratio_max: float = 0.22
     append_leaderboard: bool = True
     leaderboard_path: str = "TimeMixer/outputs_v2/serial_keepdrop/leaderboard.csv"
+    # === Online update 模式 ===
+    checkpoint_dir: str | None = None
+    online_epochs: int = 3
+    online_lr: float | None = None  # None → lr * 0.1
+    replay_buffer_ratio: float = 0.2
+    resume_from_checkpoint: str | None = None
 
 
 class ElectricityDailyDataset(Dataset):
@@ -1933,6 +1939,8 @@ def run_monthly_reproduction(cfg: RunConfig) -> dict[str, Any]:
         return _run_daily_walk_forward(cfg, df, device, findings)
     if cfg.training_mode == "block":
         return _run_block_walk_forward(cfg, df, device, findings)
+    if cfg.training_mode == "online":
+        return _run_online_walk_forward(cfg, df, device, findings)
 
     if cfg.training_mode == "frozen":
         if not cfg.frozen_train_start or not cfg.frozen_train_end_exclusive:
@@ -2682,6 +2690,313 @@ def _run_daily_walk_forward(
     return _build_result(all_da_preds, all_rt_preds, test_start, test_end, findings)
 
 
+# ── Online Update: checkpoint helpers ────────────────────────────────
+
+def save_segment_checkpoint(
+    bundle: dict[str, Any],
+    cfg: RunConfig,
+    task: str,
+    segment_name: str,
+    checkpoint_dir: str | Path,
+) -> str:
+    """Save model + scalers to a checkpoint file. Returns the path."""
+    ckpt_dir = Path(checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{task}_{segment_name}.ckpt"
+    path = ckpt_dir / fname
+    torch.save({
+        "model_state_dict": bundle["model"].state_dict(),
+        "past_scaler_mean": bundle["past_scaler"].mean_.tolist(),
+        "past_scaler_scale": bundle["past_scaler"].scale_.tolist(),
+        "future_scaler_mean": bundle["future_scaler"].mean_.tolist(),
+        "future_scaler_scale": bundle["future_scaler"].scale_.tolist(),
+        "y_scaler_mean": bundle["y_scaler"].mean_.tolist() if hasattr(bundle["y_scaler"], "mean_") else [],
+        "y_scaler_scale": bundle["y_scaler"].scale_.tolist() if hasattr(bundle["y_scaler"], "scale_") else [],
+        "task": task,
+        "segment": segment_name,
+        "hidden_dim": cfg.hidden_dim,
+        "blocks": cfg.blocks,
+        "scales": cfg.scales,
+        "dropout": cfg.dropout,
+        "seq_len": cfg.seq_len,
+    }, str(path))
+    return str(path)
+
+
+def load_segment_checkpoint(
+    checkpoint_path: str | Path,
+    device: torch.device,
+    cfg: RunConfig,
+) -> dict[str, Any]:
+    """Load a checkpoint and reconstruct the bundle (model + scalers)."""
+    ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+
+    # Reconstruct scalers
+    past_scaler = StandardScaler()
+    past_scaler.mean_ = np.array(ckpt["past_scaler_mean"])
+    past_scaler.scale_ = np.array(ckpt["past_scaler_scale"])
+    past_scaler.var_ = past_scaler.scale_ ** 2
+    past_scaler.n_features_in_ = len(past_scaler.mean_)
+
+    future_scaler = StandardScaler()
+    future_scaler.mean_ = np.array(ckpt["future_scaler_mean"])
+    future_scaler.scale_ = np.array(ckpt["future_scaler_scale"])
+    future_scaler.var_ = future_scaler.scale_ ** 2
+    future_scaler.n_features_in_ = len(future_scaler.mean_)
+
+    y_scaler = StandardScaler()
+    if ckpt["y_scaler_mean"]:
+        y_scaler.mean_ = np.array(ckpt["y_scaler_mean"])
+        y_scaler.scale_ = np.array(ckpt["y_scaler_scale"])
+        y_scaler.var_ = y_scaler.scale_ ** 2
+        y_scaler.n_features_in_ = len(y_scaler.mean_)
+    else:
+        y_scaler.mean_ = np.array([0.0])
+        y_scaler.scale_ = np.array([1.0])
+        y_scaler.var_ = np.array([1.0])
+        y_scaler.n_features_in_ = 1
+
+    # Reconstruct model — need to know input dims from scalers
+    past_dim = past_scaler.n_features_in_
+    future_dim = future_scaler.n_features_in_
+    # pred_len is determined by the segment, but for model construction we use a default
+    # The actual pred_len is set by the segment; we use seq_len as a proxy
+    # For TimeMixer, pred_len is always the segment length which is embedded in the head
+    # We need to figure out pred_len from the model state dict
+    state_dict = ckpt["model_state_dict"]
+    # Find pred_len from head.weight shape: head.0.weight has shape [pred_len * (scales+1) * hidden_dim_out, ...]
+    # Actually, the head is: LayerNorm(hidden_dim*(scales+1)) -> Linear -> pred_len
+    # So head.2.weight shape is [pred_len, hidden_dim*(scales+1)]
+    head_key = [k for k in state_dict if k.startswith("head.") and "weight" in k]
+    if head_key:
+        pred_len = state_dict[head_key[0]].shape[0]
+    else:
+        pred_len = 8  # fallback
+
+    model = build_backbone(
+        backbone_name=cfg.backbone,
+        past_dim=past_dim,
+        future_dim=future_dim,
+        pred_len=pred_len,
+        hidden_dim=ckpt.get("hidden_dim", cfg.hidden_dim),
+        blocks=ckpt.get("blocks", cfg.blocks),
+        scales=ckpt.get("scales", cfg.scales),
+        dropout=ckpt.get("dropout", cfg.dropout),
+        segment_head_mode="none",
+    )
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+
+    return {
+        "model": model,
+        "past_scaler": past_scaler,
+        "future_scaler": future_scaler,
+        "y_scaler": y_scaler,
+    }
+
+
+def _online_update_segment(
+    bundle: dict[str, Any],
+    cfg: RunConfig,
+    device: torch.device,
+    past: np.ndarray,
+    future: np.ndarray,
+    y: np.ndarray,
+    task: str,
+    segment_name: str,
+) -> dict[str, Any]:
+    """Fine-tune a loaded model on new data for a few epochs (online update).
+
+    Uses the existing scalers from the bundle (no refit) and a reduced LR.
+    """
+    model = bundle["model"]
+    ps = bundle["past_scaler"]
+    fs = bundle["future_scaler"]
+    ys = bundle["y_scaler"]
+
+    online_epochs = cfg.online_epochs
+    online_lr = cfg.online_lr if cfg.online_lr is not None else cfg.lr * 0.1
+
+    # Transform with existing scalers
+    past_t = ps.transform(past.reshape(-1, past.shape[-1])).reshape(past.shape)
+    future_t = fs.transform(future.reshape(-1, future.shape[-1])).reshape(future.shape)
+    y_t = ys.transform(y)
+
+    ds = ElectricityDailyDataset(past_t, future_t, y_t)
+    loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=online_lr, weight_decay=cfg.weight_decay)
+    loss_fn = nn.HuberLoss(delta=50.0)
+
+    model.train()
+    for _epoch in range(online_epochs):
+        for xb, fb, yb in loader:
+            xb, fb, yb = xb.to(device), fb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb, fb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+    model.eval()
+    bundle["model"] = model
+    return bundle
+
+
+def _run_online_walk_forward(
+    cfg: RunConfig, df: pd.DataFrame, device: torch.device, findings: Any
+) -> dict[str, Any]:
+    """Online walk-forward: base train once, then predict + online update per block.
+
+    Flow:
+      1. Base train on data up to D-31 (6 months), save 6 segment checkpoints.
+      2. For each 3-day block (block 0..9):
+         a. Load latest checkpoints
+         b. Predict block
+         c. Online update on block's true values (few epochs, reduced LR)
+         d. Save updated checkpoints
+      3. Return all predictions.
+    """
+    test_start, test_end = resolve_test_window(cfg)
+    test_days = date_range_days(test_start, test_end)
+    test_days = filter_available_days(
+        df, test_days, seq_len=cfg.seq_len,
+        cutoff_hour_da=cfg.cutoff_hour_da, cutoff_hour_rt=cfg.cutoff_hour_rt,
+        da_target_mode="direct", rt_target_mode="direct", inference_mode=True,
+    )
+
+    block_days_cfg = getattr(cfg, "block_days", 3)
+    da_target_mode = resolve_task_target_mode(cfg, "da")
+    rt_target_mode = resolve_task_target_mode(cfg, "rt")
+
+    # Checkpoint directory
+    ckpt_dir = Path(cfg.checkpoint_dir) if cfg.checkpoint_dir else Path(cfg.output_dir) / "online_checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    all_da_preds: list[pd.DataFrame] = []
+    all_rt_preds: list[pd.DataFrame] = []
+
+    # ── Step 1: Base train ──
+    # Use data up to the first test block's cutoff
+    first_block_start = pd.Timestamp(test_days[0])
+    base_cutoff = compute_cutoff(first_block_start, cfg.cutoff_hour_da)
+    base_train_days = date_range_days(
+        max(df["ds"].min().normalize(), base_cutoff - pd.DateOffset(months=cfg.train_months)),
+        base_cutoff + pd.Timedelta(days=1),
+    )
+    if len(base_train_days) < 30:
+        raise ValueError(f"Base training window too short: {len(base_train_days)} days")
+
+    base_train_days_w, base_valid_days_w = split_train_valid(base_train_days, cfg.val_ratio)
+
+    print(f"[ONLINE] Base train: {len(base_train_days)} days up to {base_cutoff.date()}", flush=True)
+
+    # Train all 6 segments and save checkpoints
+    for segment_name, start_idx, end_idx in SEGMENTS:
+        # DA segment
+        da_train_arrays = build_segment_arrays(
+            df, base_train_days_w, "day_ahead_clearing_price", cfg.seq_len,
+            cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
+        )
+        da_past, da_future, da_y, _ = da_train_arrays
+        da_bundle = train_model(da_past, da_future, da_y, cfg, device, task="da", segment_name=segment_name)
+        save_segment_checkpoint(da_bundle, cfg, "da", segment_name, ckpt_dir)
+
+        # RT segment
+        rt_target_col = SEGMENT_RT_TARGETS[segment_name]
+        rt_train_arrays = build_segment_arrays(
+            df, base_train_days_w, rt_target_col, cfg.seq_len,
+            cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
+        )
+        rt_past, rt_future, rt_y, _ = rt_train_arrays
+        rt_bundle = train_model(rt_past, rt_future, rt_y, cfg, device, task="rt", segment_name=segment_name)
+        save_segment_checkpoint(rt_bundle, cfg, "rt", segment_name, ckpt_dir)
+
+    print(f"[ONLINE] Base train complete. Checkpoints saved to {ckpt_dir}", flush=True)
+
+    # ── Step 2: Block-by-block predict + online update ──
+    for block_i in range(0, len(test_days), block_days_cfg):
+        block = test_days[block_i:block_i + block_days_cfg]
+        block_start = pd.Timestamp(block[0])
+        block_label = f"block_{block_i // block_days_cfg}"
+
+        print(f"[ONLINE] {block_label}: predict {block[0]} ~ {block[-1]}", flush=True)
+
+        # Predict with existing checkpoints
+        da_block_preds: list[pd.DataFrame] = []
+        rt_block_preds: list[pd.DataFrame] = []
+
+        for segment_name, start_idx, end_idx in SEGMENTS:
+            # DA predict
+            da_ckpt = load_segment_checkpoint(ckpt_dir / f"da_{segment_name}.ckpt", device, cfg)
+            da_test_arrays = build_segment_arrays(
+                df, block, "day_ahead_clearing_price", cfg.seq_len,
+                cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
+            )
+            da_test_past, da_test_future, da_test_y, da_test_baseline = da_test_arrays
+            da_pred = predict_model(da_ckpt, da_test_past, da_test_future, device, cfg.batch_size)
+            da_pred_df = _predictions_to_dataframe(
+                da_pred, da_test_y, da_test_baseline, block,
+                start_idx, end_idx, "dayahead", segment_name,
+            )
+            da_block_preds.append(da_pred_df)
+
+            # RT predict
+            rt_ckpt = load_segment_checkpoint(ckpt_dir / f"rt_{segment_name}.ckpt", device, cfg)
+            rt_target_col = SEGMENT_RT_TARGETS[segment_name]
+            rt_test_arrays = build_segment_arrays(
+                df, block, rt_target_col, cfg.seq_len,
+                cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
+            )
+            rt_test_past, rt_test_future, rt_test_y, rt_test_baseline = rt_test_arrays
+            rt_pred = predict_model(rt_ckpt, rt_test_past, rt_test_future, device, cfg.batch_size)
+            rt_pred_df = _predictions_to_dataframe(
+                rt_pred, rt_test_y, rt_test_baseline, block,
+                start_idx, end_idx, "realtime", segment_name,
+            )
+            rt_block_preds.append(rt_pred_df)
+
+        if da_block_preds:
+            all_da_preds.append(pd.concat(da_block_preds, ignore_index=True))
+        if rt_block_preds:
+            all_rt_preds.append(pd.concat(rt_block_preds, ignore_index=True))
+
+        # Online update: use block's true values as training data
+        print(f"[ONLINE] {block_label}: online update ({cfg.online_epochs} epochs, lr={cfg.online_lr or cfg.lr * 0.1})", flush=True)
+
+        for segment_name, start_idx, end_idx in SEGMENTS:
+            # DA online update
+            da_ckpt = load_segment_checkpoint(ckpt_dir / f"da_{segment_name}.ckpt", device, cfg)
+            da_update_arrays = build_segment_arrays(
+                df, block, "day_ahead_clearing_price", cfg.seq_len,
+                cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
+            )
+            da_up_past, da_up_future, da_up_y, _ = da_update_arrays
+            da_ckpt = _online_update_segment(
+                da_ckpt, cfg, device, da_up_past, da_up_future, da_up_y,
+                task="da", segment_name=segment_name,
+            )
+            save_segment_checkpoint(da_ckpt, cfg, "da", segment_name, ckpt_dir)
+
+            # RT online update
+            rt_ckpt = load_segment_checkpoint(ckpt_dir / f"rt_{segment_name}.ckpt", device, cfg)
+            rt_target_col = SEGMENT_RT_TARGETS[segment_name]
+            rt_update_arrays = build_segment_arrays(
+                df, block, rt_target_col, cfg.seq_len,
+                cfg.cutoff_hour_rt, start_idx, end_idx, target_mode=rt_target_mode,
+            )
+            rt_up_past, rt_up_future, rt_up_y, _ = rt_update_arrays
+            rt_ckpt = _online_update_segment(
+                rt_ckpt, cfg, device, rt_up_past, rt_up_future, rt_up_y,
+                task="rt", segment_name=segment_name,
+            )
+            save_segment_checkpoint(rt_ckpt, cfg, "rt", segment_name, ckpt_dir)
+
+    return _build_result(all_da_preds, all_rt_preds, test_start, test_end, findings)
+
+
 def _run_block_walk_forward(
     cfg: RunConfig, df: pd.DataFrame, device: torch.device, findings: Any
 ) -> dict[str, Any]:
@@ -2755,11 +3070,6 @@ def _train_predict_single_day(
             cfg.cutoff_hour_da, start_idx, end_idx, target_mode=da_target_mode,
         )
         da_train_past, da_train_future, da_train_y, _ = da_train_arrays
-
-        da_bundle = train_model(
-            da_train_past, da_train_future, da_train_y, cfg, device,
-            task="da", segment_name=segment_name,
-        )
 
         print(f"[DEBUG] About to train DA segment {segment_name}...", flush=True)
         da_bundle = train_model(

@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 
 from .metrics import smape_floor50 as _smape_floor50, mae as _mae, rmse as _rmse
+from .metrics import weighted_normalized_mae as _weighted_norm_mae
+from .metrics import weighted_peak_mae as _weighted_peak_mae
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,8 @@ DEFAULT_ETA = 0.8
 DEFAULT_WEIGHT_FLOOR = 0.03
 DEFAULT_LAMBDA_REFIT = 0.05
 VALID_PERIODS = ("1_8", "9_16", "17_24")
+DEFAULT_TAU_DAYS = 14.0
+DEFAULT_EVIDENCE_PRIOR = 5.0
 
 
 @dataclass
@@ -89,6 +93,7 @@ def _run_bgew_update(
     *,
     tau_block: float,
     tau_horizon: float,
+    tau_days: float,
     eta: float,
     weight_floor: float,
 ) -> tuple[dict[str, float], list[dict]]:
@@ -116,12 +121,35 @@ def _run_bgew_update(
         age_block = int(fold_data["age_block"].iloc[0])
         recency_gate = float(np.exp(-age_block / tau_block))
 
-        # Compute per-sample sample_gate = recency_gate * horizon_gate
+        # Compute per-sample sample_gate with enhanced components
         fold_data = fold_data.copy()
         fold_data["_horizon_gate"] = fold_data["horizon_day"].apply(
             lambda h: float(np.exp(-(h - 1) / tau_horizon))
         )
-        fold_data["_sample_gate"] = recency_gate * fold_data["_horizon_gate"]
+
+        # source_confidence: from tap data if available, else default 1.0
+        if "source_confidence" in fold_data.columns:
+            fold_data["_source_conf"] = fold_data["source_confidence"].fillna(1.0)
+        else:
+            fold_data["_source_conf"] = 1.0
+
+        # day_age_gate: compute from age_days if available
+        if "age_days" in fold_data.columns:
+            fold_data["_day_age_gate"] = fold_data["age_days"].apply(
+                lambda d: float(np.exp(-d / tau_days)) if pd.notna(d) else 1.0
+            )
+        else:
+            # Fallback: use age_block * 3 as approximate age_days
+            fold_data["_day_age_gate"] = fold_data["age_block"].apply(
+                lambda a: float(np.exp(-(a * 3) / tau_days))
+            )
+
+        fold_data["_sample_gate"] = (
+            recency_gate
+            * fold_data["_day_age_gate"]
+            * fold_data["_horizon_gate"]
+            * fold_data["_source_conf"]
+        )
 
         # Get y_true (same for all models, take from first available per ds)
         truth = fold_data.drop_duplicates(subset=["ds"])[["ds", "y_true"]]
@@ -138,7 +166,17 @@ def _run_bgew_update(
             m_aligned = m_data.set_index("ds").reindex(ds_vals)
             y_pred_m = m_aligned["y_pred"].values.astype(float)
 
-            loss = _weighted_smape_floor50(y_true, y_pred_m, gate_vals)
+            smape_loss = _weighted_smape_floor50(y_true, y_pred_m, gate_vals)
+            norm_mae_loss = _weighted_norm_mae(y_true, y_pred_m, gate_vals)
+            peak_mae_loss = _weighted_peak_mae(y_true, y_pred_m, gate_vals)
+
+            # Handle NaN in composite
+            if np.isnan(smape_loss):
+                loss = float("nan")
+            else:
+                norm_mae_component = norm_mae_loss if np.isfinite(norm_mae_loss) else smape_loss
+                peak_mae_component = peak_mae_loss if np.isfinite(peak_mae_loss) else smape_loss
+                loss = 0.6 * smape_loss + 0.3 * norm_mae_component + 0.1 * peak_mae_component
             if np.isfinite(loss):
                 model_losses[m] = loss
 
@@ -186,6 +224,62 @@ def _run_bgew_update(
     # (The weight_after in trace is pre-normalization; that's fine for debugging)
 
     return weights, trace_rows
+
+
+# ── Evidence Shrinkage ────────────────────────────────────────────────
+def _apply_evidence_shrinkage(
+    tap_df: pd.DataFrame,
+    models: list[str],
+    w_bgew: dict[str, float],
+    *,
+    evidence_prior: float = DEFAULT_EVIDENCE_PRIOR,
+    weight_floor: float = DEFAULT_WEIGHT_FLOOR,
+    previous_weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Apply evidence shrinkage to BGEW weights.
+
+    w_final_m = confidence_m * w_learned_m + (1 - confidence_m) * w_prior_m
+
+    where:
+      evidence_mass_m = sum(effective_gate for valid samples of model m)
+      confidence_m = evidence_mass_m / (evidence_mass_m + evidence_prior)
+      w_prior_m = previous day weights or equal weight
+    """
+    n_models = len(models)
+    w_prior = previous_weights or {m: 1.0 / n_models for m in models}
+
+    # Compute evidence mass per model
+    evidence_mass = {}
+    for m in models:
+        m_data = tap_df[tap_df["model_name"] == m]
+        if m_data.empty:
+            evidence_mass[m] = 0.0
+            continue
+        if "_sample_gate" in m_data.columns:
+            evidence_mass[m] = float(m_data["_sample_gate"].sum())
+        elif "age_block" in m_data.columns:
+            # Approximate with recency gate only
+            gates = m_data["age_block"].apply(lambda a: np.exp(-a / 3.0))
+            evidence_mass[m] = float(gates.sum())
+        else:
+            evidence_mass[m] = float(len(m_data))
+
+    # Compute shrinkage
+    w_final = {}
+    for m in models:
+        mass = evidence_mass.get(m, 0.0)
+        confidence = mass / (mass + evidence_prior)
+        w_learned = w_bgew.get(m, 1.0 / n_models)
+        w_prior_m = w_prior.get(m, 1.0 / n_models)
+        w_final[m] = confidence * w_learned + (1 - confidence) * w_prior_m
+        w_final[m] = max(w_final[m], weight_floor)
+
+    # Renormalize
+    total = sum(w_final.values())
+    if total > 0:
+        w_final = {m: w / total for m, w in w_final.items()}
+
+    return w_final
 
 
 # ── Weighted Convex Refit ────────────────────────────────────────────
@@ -255,16 +349,26 @@ def _convex_refit(
 
         def objective(w):
             y_fused = pred_matrix @ w
-            # sMAPE floor50
+            # sMAPE floor50 error
             tc = np.where(y_true_arr < 50, 50, y_true_arr)
             pc = np.where(y_fused < 50, 50, y_fused)
-            denom = (np.abs(tc) + np.abs(pc)) / 2.0
-            denom = np.where(denom < 1e-6, 1e-6, denom)
-            smape_err = np.abs(pc - tc) / denom
+            denom_smape = (np.abs(tc) + np.abs(pc)) / 2.0
+            denom_smape = np.where(denom_smape < 1e-6, 1e-6, denom_smape)
+            smape_err = np.abs(pc - tc) / denom_smape
+
             # Normalized MAE
-            mae_err = np.abs(y_true_arr - y_fused) / denom
-            # Combined loss
-            loss = 0.7 * smape_err + 0.3 * mae_err
+            denom_norm = np.maximum(np.abs(y_true_arr), 1e-6)
+            norm_mae_err = np.abs(y_true_arr - y_fused) / denom_norm
+
+            # Peak MAE (q90)
+            q90_threshold = np.quantile(y_true_arr, 0.90)
+            peak_mask = y_true_arr >= q90_threshold
+            peak_mae_err = np.zeros_like(y_true_arr)
+            if peak_mask.sum() > 0:
+                peak_mae_err[peak_mask] = np.abs(y_true_arr[peak_mask] - y_fused[peak_mask])
+
+            # Composite: 0.6 sMAPE + 0.3 normMAE + 0.1 peakMAE
+            loss = 0.6 * smape_err + 0.3 * norm_mae_err + 0.1 * peak_mae_err
             weighted_loss = np.average(loss, weights=gate_arr)
             # Regularization
             reg = lam * np.sum((w - w0) ** 2)
@@ -302,9 +406,12 @@ def run_r3d_tap_gef(
     *,
     tau_block: float = DEFAULT_TAU_BLOCK,
     tau_horizon: float = DEFAULT_TAU_HORIZON,
+    tau_days: float = DEFAULT_TAU_DAYS,
     eta: float = DEFAULT_ETA,
     weight_floor: float = DEFAULT_WEIGHT_FLOOR,
     lambda_refit: float = DEFAULT_LAMBDA_REFIT,
+    evidence_prior: float = DEFAULT_EVIDENCE_PRIOR,
+    previous_weights: dict[str, float] | None = None,
 ) -> R3DTapGEFOutput:
     """Run R3D-Tap-GEF learner on validation tap data.
 
@@ -358,14 +465,23 @@ def run_r3d_tap_gef(
             group_df, task, period, models,
             tau_block=tau_block,
             tau_horizon=tau_horizon,
+            tau_days=tau_days,
             eta=eta,
             weight_floor=weight_floor,
         )
         all_trace_rows.extend(trace)
 
-        # Step 2: Weighted Convex Refit
+        # Step 1.5: Evidence shrinkage
+        w_shrunk = _apply_evidence_shrinkage(
+            group_df, models, w_bgew,
+            evidence_prior=evidence_prior,
+            weight_floor=weight_floor,
+            previous_weights=previous_weights,
+        )
+
+        # Step 2: Weighted Convex Refit (uses shrunk weights as prior)
         w_final, source = _convex_refit(
-            group_df, task, period, models, w_bgew,
+            group_df, task, period, models, w_shrunk,
             lam=lambda_refit,
             weight_floor=weight_floor,
         )
@@ -448,9 +564,12 @@ def run_r3d_tap_gef(
             "learner_mode": "r3d_tap_gef",
             "tau_block": tau_block,
             "tau_horizon": tau_horizon,
+            "tau_days": tau_days,
             "eta": eta,
             "weight_floor": weight_floor,
             "lambda_refit": lambda_refit,
+            "evidence_prior": evidence_prior,
+            "previous_weights": previous_weights,
             "warnings": warnings,
         },
     )

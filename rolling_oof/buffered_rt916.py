@@ -414,3 +414,108 @@ def _rt916_fallback(
         task, len(rows),
     )
     return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# P0-6: Real forecast — predict from buffered checkpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+def predict_rt916_from_buffered_checkpoint(
+    task: str,
+    data_path: str,
+    predict_date: str,
+    checkpoint_dir: str,
+) -> pd.DataFrame | None:
+    """Predict D using RT916 buffered online checkpoint.
+
+    If checkpoint exists, do a single-range predict without re-training.
+    If not, return None (caller should fall back).
+
+    RT916 doesn't have a simple "load checkpoint and predict" for a single day.
+    Instead, we call predict_range with the checkpoint directory configured.
+    """
+    import os as _os
+    from datetime import date
+
+    _os.environ["OPTIM_AMP"] = "0"
+
+    D = pd.Timestamp(predict_date).date()
+
+    # Check if checkpoint directory has data
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.exists() or not any(ckpt_dir.iterdir()):
+        logger.warning("[rt916_ckpt_infer/%s] no checkpoints in %s", task, checkpoint_dir)
+        return None
+
+    try:
+        from RT916_SpikeFusionNet.pipeline import ModelPipeline
+
+        # Configure model to use checkpoint
+        _os.environ["SPIKE_RESUME_CHECKPOINT"] = str(ckpt_dir)
+
+        pipeline = ModelPipeline()
+        result = pipeline.predict_range(
+            target=task,
+            data_path=data_path,
+            start=D.isoformat(),
+            end=D.isoformat(),
+            predict_date=None,
+            output_root="oof_runs/rt916_ckpt_infer",
+            retrain_daily=False,
+            asof_hour=15,
+            training_months=12,
+        )
+
+        if result is None or not hasattr(result, "frame") or result.frame is None:
+            return None
+
+        df = result.frame.copy()
+    except Exception as exc:
+        logger.error("[rt916_ckpt_infer/%s] predict failed: %s", task, exc)
+        return None
+
+    if "ds" not in df.columns and "时刻" in df.columns:
+        df["ds"] = pd.to_datetime(df["时刻"], errors="coerce")
+    else:
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+
+    # Normalize to standard format
+    created_at = datetime.now().isoformat()
+    rows = []
+    for _, row in df.iterrows():
+        ds_val = pd.Timestamp(row["ds"])
+        hour = ds_val.hour
+        hb = hour if hour > 0 else 24
+        if 1 <= hb <= 8:
+            period = "1_8"
+        elif 9 <= hb <= 16:
+            period = "9_16"
+        else:
+            period = "17_24"
+
+        pred_col = None
+        for col in ["预测日前电价", "预测实时电价", "y_pred"]:
+            if col in row.index:
+                pred_col = col
+                break
+
+        rows.append({
+            "task": task,
+            "model_name": "rt916",
+            "target_day": D.isoformat(),
+            "business_day": D.isoformat(),
+            "ds": ds_val.isoformat(),
+            "hour_business": hb,
+            "period": period,
+            "y_pred": float(row[pred_col]) if pred_col else np.nan,
+            "y_true": np.nan,
+            "tap_source": "online_update_buffered",
+            "source_confidence": 0.95,
+            "checkpoint_path": str(ckpt_dir),
+            "run_mode": "buffered_ckpt_inference",
+            "created_at": created_at,
+        })
+
+    result_df = pd.DataFrame(rows)
+    logger.info("[rt916_ckpt_infer/%s] %d rows from checkpoint", task, len(result_df))
+    return result_df

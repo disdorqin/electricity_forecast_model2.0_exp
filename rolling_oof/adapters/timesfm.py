@@ -282,27 +282,44 @@ class TimesFMRollingAdapter(BaseRollingAdapter):
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
+        target_tag = f"timesfm_{task}"
         all_frames: list[pd.DataFrame] = []
         for offset in range(30, 0, -1):  # D-30, D-30+1, ..., D-1
             d = D - timedelta(days=offset)
             cutoff = d - timedelta(days=1)
 
-            cache_file = out / f"daily_{d.isoformat()}.csv"
-            if cache_file.exists():
+            # P0-5: Unified cache key — consistent with _predict_oof_fold internal cache
+            day_cache_dir = _get_cutoff_safe_cache_dir(
+                data_path, task, cutoff.isoformat(),
+            )
+            cache_file = out / f"daily_{target_tag}_{d.isoformat()}_cutoff_{cutoff.isoformat()}.csv"
+            if cache_file.exists() and cache_file.stat().st_size > 0:
                 try:
                     cached = pd.read_csv(cache_file)
                     if not cached.empty:
-                        logger.info(
-                            "[timesfm/daily30] cache hit: %s", cache_file.name,
-                        )
+                        logger.info("[timesfm/daily30] cache hit: %s", cache_file.name)
                         all_frames.append(cached)
                         continue
                 except Exception:
                     pass
 
-            day_cache_dir = _get_cutoff_safe_cache_dir(
-                data_path, task, cutoff.isoformat(),
-            )
+            # Also check internal cutoff-safe cache
+            internal_cache = Path(day_cache_dir) / f"predictions_{d.isoformat()}_{d.isoformat()}.csv"
+            if internal_cache.exists() and internal_cache.stat().st_size > 0:
+                try:
+                    cached = pd.read_csv(internal_cache)
+                    if not cached.empty:
+                        logger.info("[timesfm/daily30] internal cache hit for %s", d)
+                        cached["tap_source"] = "direct_inference_daily"
+                        cached["source_confidence"] = 0.90
+                        cached["predict_day"] = d.isoformat()
+                        cached["cutoff_date_daily"] = cutoff.isoformat()
+                        cached["daily_inference_day"] = d.isoformat()
+                        cached.to_csv(cache_file, index=False)
+                        all_frames.append(cached)
+                        continue
+                except Exception:
+                    pass
             result_df = _predict_oof_fold(
                 data_path=data_path,
                 start_date=d.isoformat(),

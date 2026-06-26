@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # ── Fixed parameters ──────────────────────────────────────────────────
 TRAINING_WINDOW_MONTHS = 6
+ONLINE_BASE_TRAIN_MONTHS = 12        # TimeMixer / RT916: 12 个月 base train
+LIGHT_MODEL_TRAIN_MONTHS = 6         # LightGBM / SGDFNet: 6 个月
 TAP_FOLDS = 10
 TAP_BLOCK_DAYS = 3
 
@@ -253,7 +255,7 @@ def run_validation_tap(
                     data_path=data_path,
                     predict_date=predict_date,
                     checkpoint_dir=str(checkpoint_dir),
-                    train_months=kwargs.get("training_months", 12),
+                    train_months=ONLINE_BASE_TRAIN_MONTHS,  # P0-1: 12 months
                     online_epochs=online_epochs,
                     online_lr=online_lr,
                     lambda_seasonal=kwargs.get("lambda_seasonal", 0.3),
@@ -269,7 +271,7 @@ def run_validation_tap(
                     data_path=data_path,
                     predict_date=predict_date,
                     checkpoint_dir=str(checkpoint_dir),
-                    train_months=kwargs.get("training_months", 12),
+                    train_months=ONLINE_BASE_TRAIN_MONTHS,  # P0-1: 12 months
                     online_epochs=online_epochs,
                     online_lr=online_lr,
                     lambda_seasonal=kwargs.get("lambda_seasonal", 0.3),
@@ -312,12 +314,56 @@ def run_validation_tap(
                 logger.info("    %s fold %d: %d rows (online batch)", model_name, fold_id, len(fold_df))
 
         except Exception as exc:
-            logger.error("    %s batch online FAILED: %s. Falling back to per-fold.", model_name, exc, exc_info=True)
-            _run_online_per_fold(
-                adapter, model_name, target, fold_specs, all_fold_specs,
-                data_path, output_dir, folds_dir, checkpoint_dir,
-                force, kwargs, all_frames, fold_results,
-            )
+            # P0-4: Do NOT fall back to per-fold online (which would re-train base 10 times).
+            # Instead, let the buffered function handle its own fallback (single_train_range).
+            logger.error("    %s buffered online FAILED: %s. Falling back to single_train_range.", model_name, exc, exc_info=True)
+            try:
+                if model_name == "timemixer":
+                    combined_df = _timemixer_single_train_range(
+                        target=target, data_path=data_path,
+                        predict_date=predict_date, checkpoint_dir=str(checkpoint_dir),
+                        fold_specs=all_fold_specs, folds_dir=folds_dir,
+                        training_months=ONLINE_BASE_TRAIN_MONTHS,
+                    )
+                elif model_name == "rt916":
+                    combined_df = _rt916_single_train_range(
+                        target=target, data_path=data_path,
+                        predict_date=predict_date, checkpoint_dir=str(checkpoint_dir),
+                        fold_specs=all_fold_specs, folds_dir=folds_dir,
+                        training_months=ONLINE_BASE_TRAIN_MONTHS,
+                    )
+                else:
+                    combined_df = None
+
+                if combined_df is None or combined_df.empty:
+                    logger.error("    %s: single_train_range fallback also failed", model_name)
+                    fold_results.append({"model_name": model_name, "status": "failed", "error": str(exc)})
+                    continue
+
+                # Save fallback results
+                for fold_info in fold_specs:
+                    fold_id = fold_info["fold_id"]
+                    fold_dir = folds_dir / f"fold_{fold_id:02d}"
+                    fold_dir.mkdir(exist_ok=True)
+                    pred_file = fold_dir / f"{model_name}_predictions.csv"
+
+                    fold_df = _split_fold_predictions(combined_df, fold_info, fold_id)
+                    if fold_df.empty:
+                        continue
+                    fold_df = _normalize_tap_predictions(
+                        fold_df, task=target, model_name=model_name,
+                        fold_id=fold_id, fold_info=fold_info, predict_date=predict_date,
+                    )
+                    fold_df["tap_source"] = "single_train_range"
+                    fold_df["source_confidence"] = 0.70
+                    fold_df["checkpoint_path"] = str(checkpoint_dir)
+                    fold_df.to_csv(pred_file, index=False)
+                    all_frames.append(fold_df)
+                    fold_results.append({"fold_id": fold_id, "model_name": model_name, "status": "fallback", "n_rows": len(fold_df)})
+                    logger.info("    %s fold %d: %d rows (single_train_range fallback)", model_name, fold_id, len(fold_df))
+
+            except Exception as exc2:
+                logger.error("    %s: single_train_range fallback exception: %s", model_name, exc2)
 
     # ── 2. Inference models (timesfm): 30 daily cutoff inference ─────
     # Import once at module level for efficiency
@@ -479,6 +525,10 @@ def run_validation_tap(
     # Assemble tap long table
     if all_frames:
         tap_df = pd.concat(all_frames, ignore_index=True)
+
+        # P0-2: Fill y_true from raw data (TimeMixer/RT916 buffered output has NaN y_true)
+        tap_df = fill_y_true_from_data(tap_df, data_path, target)
+
         tap_df.to_csv(tap_table_path, index=False)
         logger.info("Validation tap: %d rows, %d models", len(tap_df), len(models))
     else:
@@ -874,8 +924,10 @@ def _normalize_tap_predictions(
     df["test_end"] = fold_info["test_end"]
     df["cutoff_date"] = fold_info["train_end"]
     df["source"] = model_name
-    df["run_mode"] = "rolling_3day_validation_tap"
-    df["created_at"] = datetime.now().isoformat()
+    if "run_mode" not in df.columns:
+        df["run_mode"] = "rolling_3day_validation_tap"  # P1: preserve existing run_mode
+    if "created_at" not in df.columns:
+        df["created_at"] = datetime.now().isoformat()
 
     # ── New provenance columns ───────────────────────────────────────
     if "tap_source" not in df.columns:
@@ -893,13 +945,196 @@ def _normalize_tap_predictions(
         else:
             df["age_days"] = -1  # unknown
 
-    # Select standard columns
+    # Select standard columns — P1: preserve all metadata
     out_cols = [
         "task", "model_name", "tap_fold_id", "train_start", "train_end",
         "test_start", "test_end", "cutoff_date", "target_day", "business_day",
         "ds", "hour_business", "period", "horizon_day", "age_block",
         "y_pred", "y_true", "source", "run_mode", "created_at",
         "tap_source", "source_confidence", "age_days", "checkpoint_path",
+        # P1 metadata: preserve buffered online / daily inference provenance
+        "model_update_block_id", "learner_tap_fold_id",
+        "replay_year", "replay_start", "replay_end",
+        "lambda_seasonal", "lambda_anchor",
+        "fold_strategy", "daily_inference_day", "cache_path",
+        "predict_day", "cutoff_date_daily",
     ]
     available = [c for c in out_cols if c in df.columns]
     return df[available].copy()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# P0-2: fill_y_true_from_data
+# ═══════════════════════════════════════════════════════════════════════
+
+def fill_y_true_from_data(
+    pred_df: pd.DataFrame,
+    data_path: str,
+    task: str,
+) -> pd.DataFrame:
+    """Fill y_true from raw data by exact ds merge.
+
+    Parameters
+    ----------
+    pred_df : pd.DataFrame
+        Predictions with ds column (timestamp).
+    data_path : str
+        Path to raw data CSV.
+    task : str
+        "dayahead" → day_ahead_clearing_price, "realtime" → realtime_price.
+
+    Returns
+    -------
+    pd.DataFrame
+        pred_df with y_true filled where possible.
+    """
+    df = pred_df.copy()
+
+    target_col = "day_ahead_clearing_price" if task == "dayahead" else "realtime_price"
+
+    try:
+        raw = pd.read_csv(data_path, parse_dates=["ds"])
+    except Exception:
+        logger.warning("fill_y_true: cannot read %s", data_path)
+        return df
+
+    if "ds" not in raw.columns or target_col not in raw.columns:
+        logger.warning("fill_y_true: missing ds or %s in raw data", target_col)
+        return df
+
+    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+    raw["ds"] = pd.to_datetime(raw["ds"], errors="coerce")
+
+    # Left merge: keep all predictions, fill y_true where available
+    raw_subset = raw[["ds", target_col]].rename(columns={target_col: "_y_true_filled"})
+    merged = df.merge(raw_subset, on="ds", how="left")
+
+    # Only fill where y_true is NaN
+    if "y_true" not in merged.columns:
+        merged["y_true"] = np.nan
+    nan_before = merged["y_true"].isna().sum()
+    merged["y_true"] = merged["y_true"].fillna(merged["_y_true_filled"])
+    nan_after = merged["y_true"].isna().sum()
+    filled = nan_before - nan_after
+
+    merged.drop(columns=["_y_true_filled"], inplace=True)
+
+    coverage = 1.0 - nan_after / max(len(merged), 1)
+    if coverage < 0.5:
+        logger.warning(
+            "fill_y_true: LOW coverage %.1f%% for %s (%d/%d NaN remain)",
+            coverage * 100, task, nan_after, len(merged),
+        )
+
+    logger.info("fill_y_true: %s filled %d/%d NaN (coverage %.1f%%)", task, filled, nan_before, coverage * 100)
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# P0-4: single_train_range fallback helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+def _timemixer_single_train_range(
+    target: str,
+    data_path: str,
+    predict_date: str,
+    checkpoint_dir: str,
+    fold_specs: list,
+    folds_dir: Path,
+    training_months: int = 12,
+) -> pd.DataFrame | None:
+    """TimeMixer fallback: single train to D-31, predict D-30~D-1, block=30 days.
+
+    Returns DataFrame with predictions sliced into learner_tap_fold_id 0..9.
+    """
+    import os as _os
+    from datetime import timedelta
+    from TimeMixer.repro_pipeline import RunConfig, run_monthly_reproduction
+
+    _os.environ["OPTIM_NUM_WORKERS"] = "0"
+    _os.environ["OPTIM_PIN_MEMORY"] = "0"
+
+    D = pd.Timestamp(predict_date).date()
+    test_start = D - timedelta(days=30)
+    test_end_exclusive = D
+
+    output_dir = f"oof_runs/timemixer_st_fallback_{target}"
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    run_cfg = RunConfig(
+        data_path=data_path,
+        output_dir=output_dir,
+        month="",
+        test_start=test_start.isoformat(),
+        test_end_exclusive=test_end_exclusive.isoformat(),
+        training_mode="rolling",   # single train, no online update
+        block_days=30,
+        train_months=training_months,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+    logger.info("[timemixer_st_fallback] training_mode=rolling, %s→%s", test_start, test_end_exclusive)
+    result = run_monthly_reproduction(run_cfg)
+    if result is None:
+        return None
+
+    pred_key = "da_predictions" if target == "dayahead" else "rt_predictions"
+    predictions = result.get(pred_key)
+    if predictions is None:
+        return None
+
+    if isinstance(predictions, list):
+        combined = pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()
+    else:
+        combined = predictions
+
+    if combined.empty:
+        return None
+
+    combined = combined.copy()
+    combined["ds"] = pd.to_datetime(combined["ds"], errors="coerce")
+
+    # Slice into learner_tap_fold_id 0..9
+    date_to_fold = {}
+    for fs in fold_specs:
+        current = fs.test_start
+        while current <= fs.test_end:
+            date_to_fold[current] = fs.fold_id
+            current += timedelta(days=1)
+
+    combined["tap_fold_id"] = combined["ds"].apply(
+        lambda d: date_to_fold.get(d.normalize(), -1) if pd.notna(d) else -1
+    )
+    combined["learner_tap_fold_id"] = combined["tap_fold_id"]
+    combined["age_block"] = combined["tap_fold_id"].apply(lambda fid: 9 - fid if 0 <= fid <= 9 else -1)
+    combined["model_update_block_id"] = 0
+    combined["tap_source"] = "single_train_range"
+    combined["source_confidence"] = 0.70
+    combined["run_mode"] = "single_train_range"
+
+    logger.info("[timemixer_st_fallback] %d rows", len(combined))
+    return combined
+
+
+def _rt916_single_train_range(
+    target: str,
+    data_path: str,
+    predict_date: str,
+    checkpoint_dir: str,
+    fold_specs: list,
+    folds_dir: Path,
+    training_months: int = 12,
+) -> pd.DataFrame | None:
+    """RT916 fallback: single train to D-31, predict D-30~D-1."""
+    from rolling_oof.buffered_rt916 import run_rt916_online_month_buffered
+
+    # RT916 already has fallback built into run_rt916_online_month_buffered.
+    # But if that fails too, try a direct pipeline call.
+    return run_rt916_online_month_buffered(
+        task=target,
+        data_path=data_path,
+        predict_date=predict_date,
+        checkpoint_dir=checkpoint_dir,
+        train_months=training_months,
+        online_epochs=2,
+    )

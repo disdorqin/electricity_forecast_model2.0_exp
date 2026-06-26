@@ -112,7 +112,7 @@ def _run_bgew_update(
     fold_info = (
         tap_df.groupby("tap_fold_id")
         .agg(age_block=("age_block", "first"))
-        .sort_values("age_block", ascending=False)  # most recent first (9 -> 0)
+        .sort_values("age_block", ascending=True)  # fold 9 (age_block=0) first → fold 0 last
     )
     fold_ids = fold_info.index.tolist()
 
@@ -616,9 +616,19 @@ def run_r3d_tap_gef(
         gate = gate.apply(lambda a: np.exp(-a / tau_block))
 
         y_fused = np.zeros(len(wide))
-        for m in models:
-            if m in wide.columns:
-                y_fused += w_final.get(m, 0) * wide[m].fillna(0).values
+        # P0-7: Per-row available models, re-normalize — no fillna(0)
+        for i in range(len(wide)):
+            available_ms = [m for m in models if m in wide.columns and pd.notna(wide[m].iloc[i])]
+            if not available_ms:
+                y_fused[i] = np.nan
+                continue
+            avail_w = {m: w_final.get(m, 0) for m in available_ms}
+            total_w = sum(avail_w.values())
+            if total_w > 0:
+                avail_w = {m: w / total_w for m, w in avail_w.items()}
+            else:
+                avail_w = {m: 1.0 / len(available_ms) for m in available_ms}
+            y_fused[i] = sum(avail_w[m] * wide[m].iloc[i] for m in available_ms)
 
         common_ds = wide.index.intersection(truth.index)
         if len(common_ds) > 0:

@@ -593,3 +593,141 @@ def run_online_month_buffered(
     )
 
     return result_df
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# P0-6: Real forecast — predict from buffered checkpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+def predict_from_buffered_checkpoint(
+    task: str,
+    data_path: str,
+    predict_date: str,
+    checkpoint_dir: str,
+    *,
+    seed: int = 42,
+) -> pd.DataFrame | None:
+    """Predict D using the last buffered online checkpoint (updated to D-1).
+
+    If checkpoint exists, load and predict without re-training.
+    If not, return None (caller should fall back to normal training).
+
+    Parameters
+    ----------
+    task : str
+        "dayahead" or "realtime".
+    data_path : str
+        Path to raw CSV data.
+    predict_date : str
+        D (forecast date), ISO format "YYYY-MM-DD".
+    checkpoint_dir : str
+        Directory with buffered_online checkpoints.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        24-row prediction for day D, or None if checkpoint not available.
+    """
+    set_seed(seed)
+    _os.environ["OPTIM_NUM_WORKERS"] = "0"
+    _os.environ["OPTIM_PIN_MEMORY"] = "0"
+
+    D = pd.Timestamp(predict_date).date()
+    ckpt_dir = Path(checkpoint_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if task == "dayahead":
+        cfg_task = "da"
+        target_col = "day_ahead_clearing_price"
+        cutoff_hour = 15
+    else:
+        cfg_task = "rt"
+        cutoff_hour = 15
+        from TimeMixer.repro_pipeline import SEGMENT_RT_TARGETS
+        segment_target_cols = SEGMENT_RT_TARGETS
+
+    # Check if checkpoints exist
+    ckpt_missing = any(
+        not (ckpt_dir / f"{cfg_task}_{seg_name}.ckpt").exists()
+        for seg_name, _, _ in SEGMENTS
+    )
+    if ckpt_missing:
+        logger.warning("[predict_from_ckpt/%s] checkpoints not found in %s", task, ckpt_dir)
+        return None
+
+    # Load data
+    df = load_data(data_path)
+    df["ds"] = pd.to_datetime(df["ds"])
+
+    # Predict D
+    target_day = pd.Timestamp(D)
+    cfg = RunConfig(
+        data_path=data_path,
+        output_dir=str(ckpt_dir.parent / "real_forecast"),
+        month="",
+        seed=seed,
+    )
+
+    stitched_preds = []
+    for segment_name, start_idx, end_idx in SEGMENTS:
+        # Load checkpoint
+        ckpt = load_segment_checkpoint(ckpt_dir / f"{cfg_task}_{segment_name}.ckpt", device, cfg)
+
+        if task == "dayahead":
+            tgt = "day_ahead_clearing_price"
+        else:
+            tgt = segment_target_cols.get(segment_name, "realtime_price")
+
+        test_arrays = build_segment_arrays(
+            df, [target_day], tgt, cfg.seq_len,
+            cutoff_hour, start_idx, end_idx,
+            target_mode="direct",
+        )
+        if len(test_arrays) == 5:
+            test_past, test_future, _, test_baseline, _ = test_arrays
+        else:
+            test_past, test_future, _, test_baseline = test_arrays
+
+        pred = predict_model(ckpt, test_past, test_future, device, cfg.batch_size)
+        stitched_preds.append((segment_name, start_idx, end_idx, pred, test_baseline))
+
+    # Stitch into 24h
+    day_pred = np.zeros(24, dtype=float)
+    for seg_name, start, end, pred_arr, baseline in stitched_preds:
+        if len(pred_arr.shape) == 2 and pred_arr.shape[0] == 1:
+            pred_arr = pred_arr[0]
+        day_pred[start:end] = pred_arr + baseline[start:end]
+
+    # Build output DataFrame
+    created_at = datetime.now().isoformat()
+    rows = []
+    for hour in range(24):
+        hb = hour if hour > 0 else 24
+        if 1 <= hb <= 8:
+            period = "1_8"
+        elif 9 <= hb <= 16:
+            period = "9_16"
+        else:
+            period = "17_24"
+
+        ds = target_day + pd.Timedelta(hours=hour)
+        rows.append({
+            "task": task,
+            "model_name": "timemixer",
+            "target_day": D.isoformat(),
+            "business_day": D.isoformat(),
+            "ds": ds.isoformat(),
+            "hour_business": hb,
+            "period": period,
+            "y_pred": float(day_pred[hour]),
+            "y_true": np.nan,
+            "tap_source": "online_update_buffered",
+            "source_confidence": 0.95,
+            "checkpoint_path": str(ckpt_dir),
+            "run_mode": "buffered_ckpt_inference",
+            "created_at": created_at,
+        })
+
+    result = pd.DataFrame(rows)
+    logger.info("[predict_from_ckpt/%s] %d rows predicted from checkpoint", task, len(result))
+    return result

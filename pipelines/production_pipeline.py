@@ -237,14 +237,41 @@ def _step2_real_forecast(args, ddir: Path, target: str, manifest: dict) -> Path:
         if target not in adapter.supported_tasks:
             continue
 
-        # For online models, check if checkpoint exists from validation tap
+        # P0-6: For online buffered models, try to predict from checkpoint directly
         model_kwargs = dict(kwargs)
         if model_name in ("timemixer", "rt916"):
             checkpoint_dir = ddir / target / "validation" / f"{model_name}_checkpoints"
             if checkpoint_dir.exists():
+                logger.info("  %s: trying buffered checkpoint inference from %s", model_name, checkpoint_dir)
+                try:
+                    if model_name == "timemixer":
+                        from TimeMixer.buffered_online import predict_from_buffered_checkpoint
+                        ckpt_result = predict_from_buffered_checkpoint(
+                            task=target, data_path=args.data_path,
+                            predict_date=date_str,
+                            checkpoint_dir=str(checkpoint_dir),
+                        )
+                    else:  # rt916
+                        from rolling_oof.buffered_rt916 import predict_rt916_from_buffered_checkpoint
+                        ckpt_result = predict_rt916_from_buffered_checkpoint(
+                            task=target, data_path=args.data_path,
+                            predict_date=date_str,
+                            checkpoint_dir=str(checkpoint_dir),
+                        )
+
+                    if ckpt_result is not None and not ckpt_result.empty:
+                        logger.info("  %s: buffered checkpoint inference OK (%d rows)", model_name, len(ckpt_result))
+                        ckpt_result.to_csv(pred_file, index=False)
+                        frames.append(ckpt_result)
+                        continue
+                    else:
+                        logger.warning("  %s: checkpoint inference returned no data, falling back", model_name)
+                except Exception as exc:
+                    logger.warning("  %s: checkpoint inference failed: %s, falling back", model_name, exc)
+
+                # Fallback: use regular adapter with checkpoint_dir
                 model_kwargs["rolling_mode"] = "online"
                 model_kwargs["checkpoint_dir"] = str(checkpoint_dir)
-                logger.info("  %s: using checkpoint from validation tap", model_name)
 
         try:
             result = adapter.fold_train_predict(

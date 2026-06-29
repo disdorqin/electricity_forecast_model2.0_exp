@@ -1,0 +1,28 @@
+{
+  "agent": "p0-threshold-tuning",
+  "branch": "agent/p0-threshold-tuning",
+  "profiles_added": ["conservative", "medium", "aggressive"],
+  "files_changed": [
+    "config/p0_spike_correction_profiles.yaml",
+    "extreme/realtime_high_spike/residual_lift.py",
+    "extreme/realtime_high_spike/guardrail.py",
+    "extreme/realtime_high_spike/apply_correction.py",
+    "scripts/evaluate_realtime_spike_correction.py",
+    "scripts/evaluate_p0_realtime_spike_full.py",
+    "docs/p0_execution_board.md",
+    "docs/p0_shared_contract.md"
+  ],
+  "commands_run": [
+    "python -m py_compile scripts/evaluate_realtime_spike_correction.py",
+    "python -m py_compile scripts/evaluate_p0_realtime_spike_full.py",
+    "python -m py_compile extreme/realtime_high_spike/residual_lift.py",
+    "python -m py_compile extreme/realtime_high_spike/guardrail.py",
+    "python -m py_compile extreme/realtime_high_spike/apply_correction.py",
+    "pytest tests/test_realtime_spike_guardrail.py -v"
+  ],
+  "remaining_risks": [
+    "PyYAML dependency for YAML profile loading (JSON fallback available)",
+    "Lift quantile fitting requires >50 history samples per period",
+    "Real data verification needed on 2025-11 and 2025-12 months"
+  ]
+}

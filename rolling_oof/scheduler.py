@@ -220,6 +220,19 @@ class RollingOriginOrchestrator:
             **extra_kwargs,
         )
 
+        # 在审计之前，先 normalize 以补齐 hour_business / business_day / period 等列
+        if result.success and result.predictions_df is not None:
+            result.predictions_df = normalize_long_table(
+                result.predictions_df,
+                task=task,
+                model_name=model_name,
+                fold_id=fold.fold_id,
+                train_start=fold.train_start.isoformat(),
+                train_end=fold.train_end.isoformat(),
+                test_start=fold.test_start.isoformat(),
+                test_end=fold.test_end.isoformat(),
+            )
+
         # 审计检查
         if not self.config.skip_audit and result.predictions_df is not None:
             audit_result = audit_single_fold(
@@ -280,18 +293,8 @@ class RollingOriginOrchestrator:
         for result in fold_results:
             if not result.success or result.predictions_df is None:
                 continue
+            # Phase A 已 normalize，直接使用
             df = result.predictions_df.copy()
-            # 标准化
-            df = normalize_long_table(
-                df,
-                task=result.task,
-                model_name=result.model_name,
-                fold_id=result.fold_id,
-                train_start=result.fold_spec.train_start.isoformat(),
-                train_end=result.fold_spec.train_end.isoformat(),
-                test_start=result.fold_spec.test_start.isoformat(),
-                test_end=result.fold_spec.test_end.isoformat(),
-            )
             all_frames.append(df)
 
         if not all_frames:

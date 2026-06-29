@@ -45,8 +45,10 @@ PERIOD_MAP: dict[range, str] = {
 }
 
 
-def assign_period(hour_business: int) -> str:
+def assign_period(hour_business) -> str:
     """为商业小时(1-24)分配时段标签。"""
+    if pd.isna(hour_business):
+        return "unknown"
     for rng, label in PERIOD_MAP.items():
         if hour_business in rng:
             return label
@@ -412,14 +414,33 @@ def normalize_long_table(
         ds_series = pd.to_datetime(result["ds"])
         # hour_business: 00:00 -> 24, else actual hour
         result["hour_business"] = ds_series.apply(
-            lambda t: 24 if t.hour == 0 else t.hour
-        ).astype(int)
+            lambda t: 24 if pd.notna(t) and t.hour == 0 else (t.hour if pd.notna(t) else pd.NA)
+        ).astype("Int64")  # nullable int to tolerate NaN from missing ds
         # business_day: 00:00 归属前一天
         result["business_day"] = ds_series.apply(
-            lambda t: (t - pd.Timedelta(days=1) if t.hour == 0 else t).strftime("%Y-%m-%d")
+            lambda t: (t - pd.Timedelta(days=1) if pd.notna(t) and t.hour == 0 else t).strftime("%Y-%m-%d") if pd.notna(t) else None
         )
         # period: 1_8 / 9_16 / 17_24
         result["period"] = result["hour_business"].apply(assign_period)
+
+    # 列名自动映射：各模型输出列名各不相同，统一到 long-table 标准名
+    _COLUMN_RENAME_MAP: dict[str, str] = {
+        # 真实值列
+        "y": "y_true",
+        "actual": "y_true",
+        # 预测值列
+        "pred_y": "y_pred",
+        "price": "y_pred",
+        "predictions": "y_pred",
+        "预测值": "y_pred",
+        "prediction": "y_pred",
+        # 时间列
+        "timestamp": "ds",
+        "时刻": "ds",
+    }
+    for src, dst in _COLUMN_RENAME_MAP.items():
+        if src in result.columns and dst not in result.columns:
+            result[dst] = result[src]
 
     # 补充缺失列
     for col in LONG_TABLE_COLUMNS:

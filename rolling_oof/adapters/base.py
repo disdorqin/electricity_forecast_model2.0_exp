@@ -68,10 +68,15 @@ class BaseRollingAdapter(abc.ABC):
     # ------------------------------------------------------------------
 
     def _load_data(self, data_path: str) -> pd.DataFrame:
-        """加载原始数据。"""
+        """加载原始数据。支持 .csv / .xlsx / .xls，CSV 自动尝试 utf-8-sig → utf-8 → gbk → gb18030。"""
         path = str(data_path)
         if path.endswith(".xlsx") or path.endswith(".xls"):
             return pd.read_excel(path)
+        for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
         return pd.read_csv(path)
 
     def _ensure_column_types(self, df: pd.DataFrame) -> pd.DataFrame:

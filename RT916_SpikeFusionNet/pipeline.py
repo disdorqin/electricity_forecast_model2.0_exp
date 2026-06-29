@@ -76,6 +76,88 @@ class ModelPipeline(BaseModelPipeline):
         normalized.to_csv(output_path, index=False, encoding="utf-8-sig")
         return PredictionResult(model_name=self.model_name, target=target, output_path=output_path, frame=normalized)
 
+    def online_predict_range(
+        self,
+        target: str,
+        *,
+        fold_specs: list,
+        checkpoint_root: str,
+        online_epochs: int = 3,
+        online_lr: float | None = None,
+        **kwargs,
+    ) -> list:
+        """Run online walk-forward prediction for validation tap.
+
+        Parameters
+        ----------
+        target : str
+            "dayahead" or "realtime".
+        fold_specs : list[FoldSpec]
+            Fold specifications defining train/test windows.
+        checkpoint_root : str
+            Root directory for storing/loading model checkpoints.
+        online_epochs : int
+            Number of fine-tuning epochs per block.
+        online_lr : float | None
+            Learning rate for online update.
+
+        Returns
+        -------
+        list[pd.DataFrame]
+            One DataFrame per fold/block with predictions.
+        """
+        # Disable AMP during inference (same as predict_range)
+        os.environ["OPTIM_AMP"] = "0"
+        os.environ["OPTIM_NUM_WORKERS"] = "0"
+
+        _dp = kwargs.get("data_path")
+        if _dp:
+            core.RAW_DF_PATH = os.path.abspath(_dp)
+
+        # Read raw data and run feature engineering pipeline
+        df_raw = core._load_raw_df()
+        df_raw = core.process_features(df_raw)
+        df_raw = core.feature_engineer_solar_terms(df_raw)
+
+        cn_target = TARGET_MAP[target]
+        df_raw = core.enrich_selected_features(df_raw, target_col=cn_target)
+
+        if target == "realtime":
+            # RT needs DA linkage features
+            if bool(int(os.getenv("SPIKE_RT916_DA_LINKAGE", "1"))):
+                core.CONFIG["ENABLE_DA_LINKAGE"] = True
+                df_raw = core.enrich_da_linkage_features(df_raw, da_pred_series=None)
+            else:
+                core.CONFIG["ENABLE_DA_LINKAGE"] = False
+
+        df_raw["时刻"] = pd.to_datetime(df_raw["时刻"])
+
+        if target == "realtime":
+            # For RT, must first produce DA predictions via joint flow
+            results = core.run_online_walk_forward_joint(
+                df_raw=df_raw,
+                fold_specs=fold_specs,
+                checkpoint_root=checkpoint_root,
+                online_epochs=online_epochs,
+                online_lr=online_lr,
+            )
+            return results.get("rt_predictions", [])
+        else:
+            # DA: configure and run directly
+            test_start = str(pd.Timestamp(fold_specs[0].test_start))
+            test_end = str(pd.Timestamp(fold_specs[-1].test_end))
+            core._update_config(cn_target, [test_start, test_end])
+            core.CONFIG["ENABLE_DA_LINKAGE"] = False
+
+            return core.run_online_walk_forward_rt916(
+                target=cn_target,
+                df_raw=df_raw,
+                fold_specs=fold_specs,
+                checkpoint_root=checkpoint_root,
+                online_epochs=online_epochs,
+                online_lr=online_lr,
+            )
+
     @staticmethod
     def _resolve_start_end(kwargs: dict) -> list[str]:
         start = kwargs.get("start")

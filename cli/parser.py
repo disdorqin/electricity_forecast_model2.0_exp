@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
             "classifier_stage",
             "full",
             "rolling_oof",
+            "oof_learner",
+            "apply_oof_learner",
         ],
     )
     parser.add_argument("--target", default="both", choices=["dayahead", "realtime", "both"])
@@ -32,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", default=None, help="Single target day, YYYY-MM-DD")
     parser.add_argument("--start", default=None, help="Range start, YYYY-MM-DD")
     parser.add_argument("--end", default=None, help="Range end, YYYY-MM-DD")
-    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.xlsx")
+    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.csv")
     parser.add_argument("--output-root", default="outputs/unified_runs")
     parser.add_argument("--max-cpu-workers", type=int, default=2)
     parser.add_argument("--max-gpu-workers", type=int, default=1)
@@ -53,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clf-data", default=None)
     parser.add_argument("--daily-run-root", default="daily_runs")
     parser.add_argument("--validation-days", type=int, default=30, help="Number of days for the validation window (default: 30). Used by model_stage for weight fitting.")
+    parser.add_argument("--force", action="store_true", default=False, help="Force rerun even if outputs already exist (ignore cache)")
 
     # --- rolling-origin OOF 池参数 ---
     rolling_group = parser.add_argument_group("Rolling OOF Pool Options")
@@ -65,5 +68,67 @@ def build_parser() -> argparse.ArgumentParser:
     rolling_group.add_argument("--timemixer-block-days", type=int, default=7, help="TimeMixer block mode: days per block")
     rolling_group.add_argument("--escort-date", default=None, help="Phase C escort prediction target date")
     rolling_group.add_argument("--skip-oof-audit", action="store_true", help="Skip fold-level audit")
+
+    # --- OOF learner arguments ---
+    learner_group = parser.add_argument_group("OOF Learner Options")
+    learner_group.add_argument("--oof-path", default=None, help="Path to OOF long-table CSV")
+    learner_group.add_argument("--learner-mode", default="roel_bgew_fallback", help="Learner mode (default: roel_bgew_fallback)")
+    learner_group.add_argument("--metric", default="sMAPE_floor50", choices=["sMAPE_floor50", "MAE"], help="Optimization metric")
+    learner_group.add_argument("--tau", type=float, default=30.0, help="BGEW time constant (days)")
+    learner_group.add_argument("--eta", type=float, default=0.8, help="BGEW / R3D-Tap-GEF learning rate (default: 0.8)")
+    learner_group.add_argument("--coverage-threshold", type=float, default=0.95, help="Minimum coverage for model eligibility")
+    learner_group.add_argument("--forecast-path", default=None, help="Path to forecast long-table for apply_oof_learner")
+    learner_group.add_argument("--learner-artifact", default=None, help="Path to learner artifact directory")
+
+    # --- R3D-Tap-GEF parameters ---
+    r3d_group = parser.add_argument_group("R3D-Tap-GEF Options")
+    r3d_group.add_argument("--tau-block", type=float, default=3.0, help="Recency gate decay for fold age (default: 3.0)")
+    r3d_group.add_argument("--tau-horizon", type=float, default=2.0, help="Horizon gate decay for prediction day offset (default: 2.0)")
+    r3d_group.add_argument("--weight-floor", type=float, default=0.03, help="Minimum weight for any model (default: 0.03)")
+    r3d_group.add_argument("--lambda-refit", type=float, default=0.05, help="Regularization strength for convex refit (default: 0.05)")
+    r3d_group.add_argument("--tau-days", type=float, default=14.0,
+        help="Day age gate decay constant (default: 14.0)")
+    r3d_group.add_argument("--evidence-prior", type=float, default=5.0,
+        help="Evidence prior for shrinkage (default: 5.0)")
+
+    # --- Online update parameters ---
+    online_group = parser.add_argument_group("Online Update Options")
+    online_group.add_argument("--timemixer-online-epochs", type=int, default=3,
+        help="TimeMixer online update epochs per block (default: 3)")
+    online_group.add_argument("--timemixer-online-lr", type=float, default=None,
+        help="TimeMixer online update LR (default: auto = base_lr * 0.1)")
+    online_group.add_argument("--rt916-online-epochs", type=int, default=3,
+        help="RT916 online update epochs per block (default: 3)")
+    online_group.add_argument("--rt916-online-lr", type=float, default=None,
+        help="RT916 online update LR (default: auto = base_lr * 0.1)")
+    online_group.add_argument("--timesfm-inference-mode", default="daily",
+        choices=["daily", "block"],
+        help="TimesFM inference mode (default: daily)")
+    online_group.add_argument("--sgdfnet-fold-strategy", default="auto",
+        choices=["10x3", "3x10", "auto"],
+        help="SGDFNet fold strategy (default: auto)")
+
+    # --- Speed optimization ---
+    speed_group = parser.add_argument_group("Speed Optimization Options")
+    speed_group.add_argument("--enable-amp", action="store_true", default=None, help="Enable AMP mixed precision (auto: true if CUDA available)")
+    speed_group.add_argument("--no-amp", action="store_true", default=False, help="Disable AMP mixed precision")
+    speed_group.add_argument("--amp-dtype", default="fp16", choices=["fp16", "bf16"], help="AMP dtype (default: fp16)")
+    speed_group.add_argument("--enable-compile", action="store_true", default=False, help="Enable torch.compile (off by default)")
+    speed_group.add_argument("--compile-mode", default="default", choices=["default", "reduce-overhead"], help="torch.compile mode")
+    speed_group.add_argument("--num-workers", type=int, default=0, help="DataLoader num_workers (default: 0 on Windows)")
+    speed_group.add_argument("--pin-memory", action="store_true", default=None, help="DataLoader pin_memory (auto: true if CUDA)")
+    speed_group.add_argument("--persistent-workers", action="store_true", default=False, help="DataLoader persistent_workers (only when num_workers > 0)")
+    speed_group.add_argument("--prefetch-factor", type=int, default=2, help="DataLoader prefetch_factor (default: 2)")
+    speed_group.add_argument("--lightgbm-device", default="cpu", choices=["cpu", "gpu", "cuda"], help="LightGBM device (default: cpu)")
+    speed_group.add_argument("--lightgbm-num-threads", default="auto", help="LightGBM num_threads (auto = physical CPU cores)")
+    speed_group.add_argument("--fast-dev-run", action="store_true", default=False, help="Fast dev run: dayahead only, 1 fold, 1 model, no classifier")
+    speed_group.add_argument("--skip-rt916-validation", action="store_true", default=False, help="Skip RT916 in validation tap (temp speedup)")
+
+    # --- Validation gates ---
+    gate_group = parser.add_argument_group("Validation Gate Options")
+    gate_group.add_argument("--allow-missing-models", action="store_true", default=False,
+        help="Allow pipeline to complete with warnings even if expected models are missing")
+    gate_group.add_argument("--allow-low-ytrue", action="store_true", default=False,
+        help="Allow pipeline to continue even if y_true coverage < 95%% for some models")
 
     return parser

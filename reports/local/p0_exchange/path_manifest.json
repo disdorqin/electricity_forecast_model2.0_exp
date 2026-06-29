@@ -1,0 +1,55 @@
+{
+  "agent": "p0-path-compat",
+  "branch": "agent/p0-path-compat",
+  "base_branch": "tune-timemixer",
+  "timestamp": "2026-06-29 20:45",
+  "files_changed": [
+    ".gitignore",
+    "scripts/diagnose_extreme_events.py",
+    "docs/p0_execution_board.md",
+    "docs/p0_shared_contract.md"
+  ],
+  "files_created": [
+    "scripts/build_backtest_prediction_pack.py",
+    "scripts/diagnose_model_regime.py",
+    "scripts/build_realtime_spike_dataset.py",
+    "scripts/train_realtime_spike_risk.py",
+    "scripts/predict_realtime_spike_risk.py",
+    "scripts/evaluate_realtime_spike_correction.py",
+    "scripts/evaluate_p0_realtime_spike_full.py"
+  ],
+  "commands_run": [
+    "python -m py_compile scripts/build_backtest_prediction_pack.py",
+    "python -m py_compile scripts/diagnose_extreme_events.py",
+    "python -m py_compile scripts/diagnose_model_regime.py",
+    "python -m py_compile scripts/build_realtime_spike_dataset.py",
+    "python -m py_compile scripts/train_realtime_spike_risk.py",
+    "python -m py_compile scripts/predict_realtime_spike_risk.py",
+    "python -m py_compile scripts/evaluate_realtime_spike_correction.py",
+    "python -m py_compile scripts/evaluate_p0_realtime_spike_full.py",
+    "python scripts/build_backtest_prediction_pack.py --data-path data/shandong_pmos_hourly.xlsx --runs-root daily_runs --target realtime --start-date 2025-11-01 --end-date 2025-11-05 --out-dir reports/local/p0_full_run/prediction_pack --models all"
+  ],
+  "outputs_created": [
+    "reports/local/p0_full_run/prediction_pack/prediction_pack_realtime_2025_11_01_2025_11_05.csv",
+    "reports/local/p0_full_run/prediction_pack/coverage_report.csv",
+    "reports/local/p0_full_run/prediction_pack/gap_report.csv",
+    "reports/local/p0_exchange/path_manifest.json"
+  ],
+  "path_fixes": [
+    "diagnose_extreme_events.py: default --data-path updated to .xlsx, --runs-root and --prediction-pack flags added, --out-dir default updated to reports/local/p0_full_run/extreme_events",
+    "build_backtest_prediction_pack.py: scans daily_runs/ with outputs/ fallback, no crash on missing files, coverage/gap report generation",
+    "diagnose_model_regime.py: unified CLI flags, supports --prediction-pack",
+    "build_realtime_spike_dataset.py: unified CLI flags",
+    "train_realtime_spike_risk.py: unified CLI flags, sklearn optional",
+    "predict_realtime_spike_risk.py: unified CLI flags",
+    "evaluate_realtime_spike_correction.py: unified CLI flags (compat stubs)",
+    "evaluate_p0_realtime_spike_full.py: unified CLI flags, orchestrator for all steps",
+    ".gitignore: reports/ -> reports/local/, added data/local_ledger/, ledger/local/"
+  ],
+  "remaining_risks": [
+    "No actual daily_runs/ data on dev machine — coverage/gap reports show 'no files found' which is expected",
+    "evaluate_realtime_spike_correction.py and evaluate_p0_realtime_spike_full.py are simplified versions (without full spike correction module deps) for compatibility with tune-timemixer base",
+    "Prediction pack filename format: prediction_pack_realtime_{start_YYYY}_{MM}_{end_YYYY}_{MM}.csv — confirm with Runner's expected name",
+    "Some scripts depend on external modules (e.g., sklearn for train_realtime_spike_risk.py) — import errors at runtime are expected if not installed"
+  ]
+}

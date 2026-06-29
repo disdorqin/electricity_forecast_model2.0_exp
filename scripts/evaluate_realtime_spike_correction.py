@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-evaluate_realtime_spike_correction.py — Evaluate P0 spike correction for a single profile.
+evaluate_realtime_spike_correction.py — Evaluate P0 spike correction.
+
+Compares predictions with and without correction to measure improvement.
+Supports tuning profiles (conservative/medium/aggressive) and explicit overrides.
 
 CLI:
+    # Single profile
     python scripts/evaluate_realtime_spike_correction.py \\
         --prediction-pack outputs/prediction_pack.csv \\
         --risk-predictions outputs/risk_predictions.csv \\
@@ -20,6 +24,14 @@ CLI:
 
     # Run all three profiles
     python scripts/evaluate_realtime_spike_correction.py \\
+        --prediction-pack ... \\
+        --profile all
+
+    # Unified CLI (orchestrator compatibility)
+    python scripts/evaluate_realtime_spike_correction.py \\
+        --data-path data/shandong_pmos_hourly.xlsx \\
+        --runs-root daily_runs \\
+        --start-date 2025-11-01 --end-date 2025-12-31 \\
         --prediction-pack ... \\
         --profile all
 
@@ -301,12 +313,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate P0 realtime spike correction for a profile.",
     )
-    # Standard P0 CLI flags (accepted but not all used by this script)
-    parser.add_argument("--data-path", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--runs-root", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--target", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--start-date", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--end-date", default=None, help="Ignored, kept for orchestrator compatibility")
+    # Standard P0 CLI flags (kept for orchestrator compatibility)
+    parser.add_argument("--data-path", default=None,
+                        help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--runs-root", default=None,
+                        help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--target", default=None,
+                        help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--start-date", default=None,
+                        help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--end-date", default=None,
+                        help="Ignored, kept for orchestrator compatibility")
 
     parser.add_argument(
         "--prediction-pack", required=True,

@@ -3,45 +3,46 @@
 """
 evaluate_p0_realtime_spike_full.py — Full P0 realtime spike correction evaluation.
 
-Orchestrates correction + evaluation across one or more tuning profiles.
-Designed for offline correction evaluation (not production_pipeline).
+Dual-mode operation:
 
-CLI:
-    # Single profile
-    python scripts/evaluate_p0_realtime_spike_full.py \\
-        --prediction-pack outputs/prediction_pack.csv \\
-        --risk-predictions outputs/risk_predictions.csv \\
-        --history outputs/history.csv \\
-        --profile conservative \\
-        --profile-config config/p0_spike_correction_profiles.yaml \\
-        --out-dir reports/local/p0_tuning
+Mode 1 — Profile-based Correction Evaluation (default):
+    Runs the correction pipeline with tuning profiles.
+    Requires --prediction-pack and --risk-predictions.
 
-    # All three profiles
-    python scripts/evaluate_p0_realtime_spike_full.py \\
-        --prediction-pack outputs/prediction_pack.csv \\
-        --profile all
+    CLI:
+        python scripts/evaluate_p0_realtime_spike_full.py \\
+            --prediction-pack outputs/prediction_pack.csv \\
+            --risk-predictions outputs/risk_predictions.csv \\
+            --history outputs/history.csv \\
+            --profile conservative \\
+            --profile-config config/p0_spike_correction_profiles.yaml \\
+            --out-dir reports/local/p0_tuning
 
-    # With explicit overrides
-    python scripts/evaluate_p0_realtime_spike_full.py \\
-        --prediction-pack outputs/prediction_pack.csv \\
-        --spike-prob-threshold 0.70 \\
-        --max-lift-ratio 0.25
+    Output per profile:
+        - correction_result.csv       — full corrected DataFrame
+        - correction_manifest.json    — profile params + metrics
+        - metrics_summary.json        — all computed metrics
 
-Output per profile:
-    - correction_result.csv       — full corrected DataFrame
-    - correction_manifest.json    — profile params + metrics
-    - metrics_summary.json        — all computed metrics
-
-Combined output (when --profile all):
-    - reports/local/p0_tuning/all_profiles_summary.json
+Mode 2 — Orchestrator (when --steps is provided or --run-all):
+    Runs the full P0 evaluation chain over a date window:
+      1. Build prediction pack
+      2. Diagnose extreme events
+      3. Diagnose model regime
+      4. Build spike dataset
+      5. Train spike risk model
+      6. Predict spike risk
+      7. Evaluate spike correction
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
+import subprocess
 import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -63,7 +64,9 @@ from extreme.realtime_high_spike.apply_correction import (
 from extreme.realtime_high_spike.residual_lift import get_period
 
 
-# ── Metrics (shared with evaluate_realtime_spike_correction) ─────────
+# ═════════════════════════════════════════════════════════════════════
+# Mode 1 — Metrics & Correction Evaluation (SA3 profile-based)
+# ═════════════════════════════════════════════════════════════════════
 
 def compute_smape(y_true: pd.Series, y_pred: pd.Series) -> float:
     """Compute sMAPE with floor at 50."""
@@ -182,8 +185,6 @@ def compute_all_metrics(df: pd.DataFrame) -> dict[str, Any]:
     return metrics
 
 
-# ── Run single profile ───────────────────────────────────────────────
-
 def run_evaluation(
     prediction_pack_path: Path,
     risk_predictions_path: Path,
@@ -231,48 +232,183 @@ def run_evaluation(
     return metrics
 
 
-# ── CLI ──────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# Mode 2 — Orchestrator (SA2 pipeline runner)
+# ═════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("evaluate_p0_realtime_spike_full")
+
+STEPS = [
+    "build_pack", "diagnose_extreme", "diagnose_regime",
+    "build_spike_dataset", "train_spike_model",
+    "predict_spike_risk", "evaluate_correction",
+]
+
+STEP_SCRIPTS = {
+    "build_pack": "scripts/build_backtest_prediction_pack.py",
+    "diagnose_extreme": "scripts/diagnose_extreme_events.py",
+    "diagnose_regime": "scripts/diagnose_model_regime.py",
+    "build_spike_dataset": "scripts/build_realtime_spike_dataset.py",
+    "train_spike_model": "scripts/train_realtime_spike_risk.py",
+    "predict_spike_risk": "scripts/predict_realtime_spike_risk.py",
+    "evaluate_correction": "scripts/evaluate_realtime_spike_correction.py",
+}
+
+
+def resolve_steps(args: argparse.Namespace) -> list[str]:
+    selected = STEPS[:] if args.steps == "all" else [s.strip() for s in args.steps.split(",")]
+    if args.skip_steps:
+        skip = {s.strip() for s in args.skip_steps.split(",")}
+        selected = [s for s in selected if s not in skip]
+    return selected
+
+
+def get_pack_path(args: argparse.Namespace) -> str:
+    if args.prediction_pack:
+        return args.prediction_pack
+    start_compact = args.start_date.replace("-", "_")
+    end_compact = args.end_date.replace("-", "_")
+    return str(Path(args.out_dir) / "prediction_pack" / f"prediction_pack_realtime_{start_compact}_{end_compact}.csv")
+
+
+def run_step(step: str, script: str, args: argparse.Namespace, extra: Optional[list[str]] = None) -> int:
+    cmd = [
+        args.python, script,
+        "--data-path", args.data_path,
+        "--runs-root", args.runs_root,
+        "--target", args.target,
+        "--start-date", args.start_date,
+        "--end-date", args.end_date,
+    ]
+    pack_path = get_pack_path(args)
+
+    if step == "build_pack":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "prediction_pack"), "--models", args.models]
+    elif step == "diagnose_extreme":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "extreme_events")]
+        if Path(pack_path).exists():
+            cmd += ["--prediction-pack", pack_path]
+    elif step == "diagnose_regime":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "regime")]
+        if Path(pack_path).exists():
+            cmd += ["--prediction-pack", pack_path]
+    elif step == "build_spike_dataset":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "spike_dataset")]
+        if Path(pack_path).exists():
+            cmd += ["--prediction-pack", pack_path]
+    elif step == "train_spike_model":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "spike_model")]
+        dataset = Path(args.out_dir) / "spike_dataset" / "spike_training_dataset.csv"
+        if dataset.exists():
+            cmd += ["--dataset", str(dataset)]
+    elif step == "predict_spike_risk":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "spike_prediction"),
+                "--model-dir", str(Path(args.out_dir) / "spike_model")]
+        if Path(pack_path).exists():
+            cmd += ["--prediction-pack", pack_path]
+    elif step == "evaluate_correction":
+        cmd += ["--out-dir", str(Path(args.out_dir) / "correction_eval")]
+        if Path(pack_path).exists():
+            cmd += ["--prediction-pack", pack_path]
+
+    if extra:
+        cmd += extra
+
+    cmd_str = " ".join(str(c) for c in cmd)
+    if args.dry_run:
+        logger.info("[DRY RUN] %s", cmd_str)
+        return 0
+    logger.info("Running '%s': %s", step, cmd_str)
+    return subprocess.run(cmd).returncode
+
+
+def write_summary(results: dict[str, str], out_dir: Path, args: argparse.Namespace) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "evaluation": "P0 Full Window Evaluation",
+        "agent": "p0-path-compat",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "args": vars(args),
+        "step_results": results,
+        "prediction_pack": get_pack_path(args),
+    }
+    (out_dir / "p0_evaluation_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    lines = [
+        "# P0 Full Window Evaluation Summary",
+        f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"**Range**: {args.start_date} ~ {args.end_date}",
+        "",
+        "## Step Results",
+        "",
+        "| Step | Status |",
+        "|------|--------|",
+    ]
+    for step in STEPS:
+        lines.append(f"| {step} | {results.get(step, 'skipped')} |")
+    (out_dir / "p0_evaluation_summary.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Unified CLI
+# ═════════════════════════════════════════════════════════════════════
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Full P0 realtime spike correction evaluation",
-    )
-    # Standard P0 CLI flags (accepted but not all used by this script)
-    parser.add_argument("--data-path", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--runs-root", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--target", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--start-date", default=None, help="Ignored, kept for orchestrator compatibility")
-    parser.add_argument("--end-date", default=None, help="Ignored, kept for orchestrator compatibility")
-
-    parser.add_argument(
-        "--prediction-pack", required=True,
-        help="Path to prediction pack CSV",
-    )
-    parser.add_argument(
-        "--risk-predictions", required=True,
-        help="Path to risk predictions CSV",
-    )
-    parser.add_argument(
-        "--history", default=None,
-        help="Optional historical data CSV for lift quantile fitting",
-    )
-    parser.add_argument(
-        "--profile", default="medium",
-        choices=["conservative", "medium", "aggressive", "all"],
-        help="Correction profile (default: medium). 'all' runs all three.",
-    )
-    parser.add_argument(
-        "--profile-config",
-        default="config/p0_spike_correction_profiles.yaml",
-        help="Profile config file (YAML or JSON)",
-    )
-    parser.add_argument(
-        "--out-dir",
-        default="reports/local/p0_tuning",
-        help="Output directory",
+        description="Full P0 realtime spike correction evaluation. "
+                    "Runs profile-based correction evaluation (default) "
+                    "or full pipeline orchestration (with --steps).",
     )
 
-    # Explicit overrides
+    # --- Mode selection ---
+    parser.add_argument("--steps", default=None,
+                        help=f"Comma-separated steps: {','.join(STEPS)}, or 'all'. "
+                             "If provided, runs orchestrator mode.")
+    parser.add_argument("--skip-steps", default=None,
+                        help="Comma-separated steps to skip (orchestrator mode).")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print commands without executing (orchestrator mode).")
+    parser.add_argument("--models", default="all",
+                        help="Models to include (comma-separated or 'all').")
+    parser.add_argument("--python", default=sys.executable,
+                        help="Python interpreter (orchestrator mode).")
+
+    # --- Universal CLI flags ---
+    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.xlsx",
+                        help="Path to raw data")
+    parser.add_argument("--runs-root", default="daily_runs",
+                        help="Prediction run root directory")
+    parser.add_argument("--prediction-pack", default=None,
+                        help="Pre-built prediction pack CSV")
+    parser.add_argument("--target", default="realtime",
+                        choices=["realtime", "dayahead", "both"],
+                        help="Market target")
+    parser.add_argument("--start-date", default="2025-11-01",
+                        help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", default="2025-12-31",
+                        help="End date (YYYY-MM-DD)")
+    parser.add_argument("--out-dir", default="reports/local/p0_full_run",
+                        help="Root output directory")
+
+    # --- Profile arguments (correction evaluation mode) ---
+    parser.add_argument("--risk-predictions", default=None,
+                        help="Path to risk predictions CSV (correction evaluation mode)")
+    parser.add_argument("--history", default=None,
+                        help="Optional historical data CSV for lift quantile fitting")
+    parser.add_argument("--profile", default="medium",
+                        choices=["conservative", "medium", "aggressive", "all"],
+                        help="Correction profile (default: medium). 'all' runs all three.")
+    parser.add_argument("--profile-config",
+                        default="config/p0_spike_correction_profiles.yaml",
+                        help="Profile config file (YAML or JSON)")
+
+    # --- Explicit overrides ---
     parser.add_argument("--spike-prob-threshold", type=float, default=None)
     parser.add_argument("--max-lift-ratio", type=float, default=None)
     parser.add_argument("--max-absolute-lift", type=float, default=None)
@@ -282,68 +418,105 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Main dispatch
+# ═════════════════════════════════════════════════════════════════════
+
 def main() -> None:
     args = parse_args()
 
-    pp_path = Path(args.prediction_pack)
-    rp_path = Path(args.risk_predictions)
-    hist_path = Path(args.history) if args.history else None
-    config_path = args.profile_config
+    # Determine mode: orchestrator if --steps is specified, else correction evaluation
+    if args.steps is not None:
+        # ── Orchestrator mode (SA2) ──
+        logger.info("Orchestrator mode: steps=%s", args.steps)
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not pp_path.exists():
-        sys.exit(f"Error: prediction pack not found: {pp_path}")
-    if not rp_path.exists():
-        sys.exit(f"Error: risk predictions not found: {rp_path}")
+        steps = resolve_steps(args)
+        logger.info("Steps: %s", steps)
 
-    overrides: dict[str, Any] = {}
-    if args.spike_prob_threshold is not None:
-        overrides["spike_prob_threshold"] = args.spike_prob_threshold
-    if args.max_lift_ratio is not None:
-        overrides["max_lift_ratio"] = args.max_lift_ratio
-    if args.max_absolute_lift is not None:
-        overrides["max_absolute_lift"] = args.max_absolute_lift
-    if args.protect_normal_hours is not None:
-        overrides["protect_normal_hours"] = args.protect_normal_hours.lower() == "true"
+        results: dict[str, str] = {}
+        for step in steps:
+            script = STEP_SCRIPTS.get(step)
+            if not script or not Path(script).exists():
+                logger.warning("Script not found for step '%s'", step)
+                results[step] = "script_not_found"
+                continue
+            rc = run_step(step, script, args)
+            results[step] = "passed" if rc == 0 else f"failed (rc={rc})"
 
-    profiles: list[str]
-    if args.profile == "all":
-        profiles = ["conservative", "medium", "aggressive"]
+        write_summary(results, out_dir, args)
+
+        passed = all(v == "passed" for v in results.values())
+        logger.info("=" * 60)
+        logger.info("P0 EVALUATION COMPLETE")
+        for step, status in results.items():
+            logger.info("  %s: %s", step, status)
+        logger.info("Overall: %s", "ALL PASSED" if passed else "SOME FAILED")
+        sys.exit(0 if passed else 1)
+
     else:
-        profiles = [args.profile]
+        # ── Correction evaluation mode (SA3) ──
+        pp_path = Path(args.prediction_pack) if args.prediction_pack else None
+        rp_path = Path(args.risk_predictions) if args.risk_predictions else None
 
-    all_metrics: dict[str, Any] = {}
+        if pp_path is None or not pp_path.exists():
+            sys.exit("Error: prediction pack not found. Provide --prediction-pack or use --steps for orchestrator mode.")
+        if rp_path is None or not rp_path.exists():
+            sys.exit("Error: risk predictions not found. Provide --risk-predictions or use --steps for orchestrator mode.")
 
-    for pname in profiles:
-        print(f"\n{'='*60}")
-        print(f"  Profile: {pname}")
-        print(f"{'='*60}")
+        hist_path = Path(args.history) if args.history else None
+        config_path = args.profile_config
 
-        profile = get_profile(pname, config_path=config_path, overrides=overrides)
-        out_dir = Path(args.out_dir) / pname
+        overrides: dict[str, Any] = {}
+        if args.spike_prob_threshold is not None:
+            overrides["spike_prob_threshold"] = args.spike_prob_threshold
+        if args.max_lift_ratio is not None:
+            overrides["max_lift_ratio"] = args.max_lift_ratio
+        if args.max_absolute_lift is not None:
+            overrides["max_absolute_lift"] = args.max_absolute_lift
+        if args.protect_normal_hours is not None:
+            overrides["protect_normal_hours"] = args.protect_normal_hours.lower() == "true"
 
-        metrics = run_evaluation(
-            prediction_pack_path=pp_path,
-            risk_predictions_path=rp_path,
-            history_path=hist_path,
-            profile=profile,
-            out_dir=out_dir,
-        )
+        profiles: list[str]
+        if args.profile == "all":
+            profiles = ["conservative", "medium", "aggressive"]
+        else:
+            profiles = [args.profile]
 
-        all_metrics[pname] = metrics
+        all_metrics: dict[str, Any] = {}
 
-        print(f"  overall sMAPE_floor50:    {metrics.get('realtime_overall_smape_floor50', 'N/A')}")
-        print(f"  9_16 sMAPE_floor50:       {metrics.get('9_16_smape_floor50', 'N/A')}")
-        print(f"  high_spike MAE:           {metrics.get('high_spike_mae', 'N/A')}")
-        print(f"  false_lift_rate:          {metrics.get('false_lift_rate', 'N/A')}")
-        print(f"  normal_hours_degradation: {metrics.get('normal_hours_degradation', 'N/A')}")
+        for pname in profiles:
+            print(f"\n{'='*60}")
+            print(f"  Profile: {pname}")
+            print(f"{'='*60}")
 
-    if len(profiles) > 1:
-        summary_path = Path(args.out_dir) / "all_profiles_summary.json"
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(all_metrics, f, indent=2, ensure_ascii=False)
-        print(f"\n  Combined: {summary_path}")
+            profile = get_profile(pname, config_path=config_path, overrides=overrides)
+            out_dir = Path(args.out_dir) / pname
 
-    print("\nDone.")
+            metrics = run_evaluation(
+                prediction_pack_path=pp_path,
+                risk_predictions_path=rp_path,
+                history_path=hist_path,
+                profile=profile,
+                out_dir=out_dir,
+            )
+
+            all_metrics[pname] = metrics
+
+            print(f"  overall sMAPE_floor50:    {metrics.get('realtime_overall_smape_floor50', 'N/A')}")
+            print(f"  9_16 sMAPE_floor50:       {metrics.get('9_16_smape_floor50', 'N/A')}")
+            print(f"  high_spike MAE:           {metrics.get('high_spike_mae', 'N/A')}")
+            print(f"  false_lift_rate:          {metrics.get('false_lift_rate', 'N/A')}")
+            print(f"  normal_hours_degradation: {metrics.get('normal_hours_degradation', 'N/A')}")
+
+        if len(profiles) > 1:
+            summary_path = Path(args.out_dir) / "all_profiles_summary.json"
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(all_metrics, f, indent=2, ensure_ascii=False)
+            print(f"\n  Combined: {summary_path}")
+
+        print("\nDone.")
 
 
 if __name__ == "__main__":

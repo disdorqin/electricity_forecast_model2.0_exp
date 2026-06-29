@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Unify CLI interface and metric definitions across all P0 offline-evaluation scripts,
-and define the tuning profile contract for spike correction.
+Unify CLI interface, path resolution, metric definitions, and tuning profile contract
+across all P0 offline-evaluation scripts so the Runner can execute a full P0 pipeline
+without editing individual scripts.
 
 ## Universal CLI Flags
 
@@ -64,12 +65,16 @@ Every pack-building run must emit two artifacts:
 |---|---|
 | `reports/local/p0_full_run/` | Full evaluation outputs aggregated over the whole window |
 | `reports/local/p0_exchange/` | Cross-agent exchange artifacts (manifest, notes) |
+| `reports/local/p0_tuning/` | Per-profile tuning outputs |
+| `reports/local/p0_tuning/conservative/` | Conservative profile correction manifest |
+| `reports/local/p0_tuning/medium/` | Medium profile correction manifest |
+| `reports/local/p0_tuning/aggressive/` | Aggressive profile correction manifest |
 
 ## Data Loading Contract
 
 - Prefer `--data-path` when provided
 - Fallback: `data/shandong_pmos_hourly.xlsx` then `data/shandong_pmos_hourly.csv`
-- Support GBK / UTF‑8 / UTF‑8‑SIG encoding
+- Support GBK / UTF-8 / UTF-8-SIG encoding
 - Never hardcode local absolute paths
 
 ## Profiles
@@ -99,6 +104,15 @@ Three tuning profiles defined in `config/p0_spike_correction_profiles.yaml`:
 | `normal_hours_degradation` | `normal_after_smape_floor50 - normal_before_smape_floor50` |
 | `false_lift_rate` | Proportion of non-high-spike hours with `final_pred > base_fused_pred AND lift > 0` |
 
+## sMAPE_floor50 Formula (Canonical)
+
+```
+Both y_true and y_pred individually floored at 50
+denom = (|yt| + |yp|) / 2
+smape = |yt - yp| / denom * 100
+capped at 50.0
+```
+
 ## Data Leakage Rules
 
 1. Prediction D+1: **Cannot use D+1 realtime price**
@@ -108,6 +122,7 @@ Three tuning profiles defined in `config/p0_spike_correction_profiles.yaml`:
 ## Business Time Mapping
 
 - 00:00 natural → hour_business=24 of previous business day
+- business_day = ds normalized to date, shifted -1 day if hour=0
 
 ## Correction Pipeline
 

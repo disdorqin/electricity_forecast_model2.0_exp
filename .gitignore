@@ -33,6 +33,21 @@ fusion_runs/
 daily_runs/
 daily_runs_*/
 ExtremPriceClf/daily_runs/
+data/local_ledger/
+ledger/local/
+
+# Generated analysis reports (local only; docs/report templates stay)
+reports/local/
+reports/local/p0_full_run/
+reports/local/p0_exchange/
+
+# Local ledger data (prediction ledger — tracked .gitignore)
+data/local_ledger/
+ledger/local/
+
+# Local reports & outputs
+reports/local/
+outputs/local/
 
 # Ad-hoc scripts & outputs (not part of the project)
 run_*.py

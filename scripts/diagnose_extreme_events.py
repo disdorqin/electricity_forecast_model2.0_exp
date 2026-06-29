@@ -87,13 +87,15 @@ def parse_args(argv=None):
         description="Extreme electricity price event diagnostic tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.csv", help="Path to raw data")
+    parser.add_argument("--data-path", default="data/shandong_pmos_hourly.xlsx", help="Path to raw data (xlsx or csv)")
+    parser.add_argument("--runs-root", default=None, help="Prediction run root (alternative way to locate predictions)")
+    parser.add_argument("--prediction-pack", default=None, help="Pre-built prediction pack CSV")
     parser.add_argument("--pred-dir", default=None, help="Directory with prediction CSV(s)")
     parser.add_argument("--prediction-path", default=None, dest="pred_path", help="Single prediction CSV")
     parser.add_argument("--target", default="realtime", choices=["dayahead","realtime","both"], help="Market")
     parser.add_argument("--start-date", default="2025-11-01", help="Start date")
     parser.add_argument("--end-date", default="2025-12-31", help="End date")
-    parser.add_argument("--out-dir", default="reports/local/extreme_events", help="Output directory")
+    parser.add_argument("--out-dir", default="reports/local/p0_full_run/extreme_events", help="Output directory")
     parser.add_argument("--high-quantile", type=float, default=0.95, help="High quantile")
     parser.add_argument("--low-quantile", type=float, default=0.10, help="Low quantile")
     parser.add_argument("--spread-quantile", type=float, default=0.95, help="Spread quantile")
@@ -198,6 +200,45 @@ def load_predictions(pred_dir, pred_path, start_date, end_date):
                 merged["ds"].min(), merged["ds"].max())
     if merged.empty: return None
     return merged
+
+
+def load_predictions_from_pack(pack_path, start_date, end_date):
+    """Load predictions from a pre-built prediction pack CSV."""
+    path = Path(pack_path)
+    if not path.exists():
+        logger.warning("Prediction pack not found: %s", pack_path)
+        return None
+    try:
+        pdf = pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            pdf = pd.read_csv(path, encoding="gbk")
+        except Exception:
+            logger.error("Cannot read prediction pack: %s", path)
+            return None
+    pdf.rename(columns={
+        "时刻": "ds", "prediction": "y_pred", "pred": "y_pred",
+        "actual": "y_true", "model": "model_name",
+    }, inplace=True)
+    if "ds" not in pdf.columns:
+        logger.warning("Prediction pack has no ds column; cols=%s", list(pdf.columns))
+        return None
+    pdf["ds"] = pd.to_datetime(pdf["ds"], errors="coerce")
+    pdf = pdf.dropna(subset=["ds"]).copy()
+    if "y_pred" not in pdf.columns:
+        pdf["y_pred"] = float("nan")
+    else:
+        pdf["y_pred"] = pd.to_numeric(pdf["y_pred"], errors="coerce")
+    if "model_name" not in pdf.columns:
+        pdf["model_name"] = "unknown"
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+    pdf = pdf[(pdf["ds"] >= start_ts) & (pdf["ds"] < end_ts)].copy()
+    logger.info("Loaded prediction pack: %d rows, %d models, %s ~ %s",
+                len(pdf), pdf["model_name"].nunique(),
+                pdf["ds"].min(), pdf["ds"].max())
+    return pdf if not pdf.empty else None
+
 
 def compute_thresholds(df, args):
     price_col = "realtime_price"
@@ -688,8 +729,13 @@ def main():
         logger.error('No data after filtering. Exiting.')
         sys.exit(1)
 
-    # Load predictions (optional)
-    pred_df = load_predictions(args.pred_dir, args.pred_path, args.start_date, args.end_date)
+    # Load predictions (optional) — try prediction-pack first, then legacy paths
+    pred_df = None
+    if args.prediction_pack:
+        logger.info("Loading predictions from prediction pack: %s", args.prediction_pack)
+        pred_df = load_predictions_from_pack(args.prediction_pack, args.start_date, args.end_date)
+    if pred_df is None:
+        pred_df = load_predictions(args.pred_dir, args.pred_path, args.start_date, args.end_date)
     pred_available = pred_df is not None and not pred_df.empty
 
     # Compute thresholds

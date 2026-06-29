@@ -1,0 +1,30 @@
+# P0 Realtime Spike Correction Profiles
+# Each profile controls the aggressiveness of residual lift + guardrail.
+#
+# Parameters:
+#   spike_prob_threshold  — minimum spike probability to consider lift (lower = more aggressive)
+#   max_lift_ratio        — maximum lift as fraction of base_pred (higher = more aggressive)
+#   max_absolute_lift     — maximum lift in absolute price units (higher = more aggressive)
+#   protect_normal_hours  — if true, apply extra guard in non-spike-prone periods (1_8, 17_24)
+#   period_9_16_boost     — multiplier applied to lift candidate in 9_16 period (higher = more aggressive)
+
+conservative:
+  spike_prob_threshold: 0.75
+  max_lift_ratio: 0.20
+  max_absolute_lift: 200
+  protect_normal_hours: true
+  period_9_16_boost: 1.0
+
+medium:
+  spike_prob_threshold: 0.60
+  max_lift_ratio: 0.35
+  max_absolute_lift: 350
+  protect_normal_hours: true
+  period_9_16_boost: 1.15
+
+aggressive:
+  spike_prob_threshold: 0.45
+  max_lift_ratio: 0.60
+  max_absolute_lift: 600
+  protect_normal_hours: true
+  period_9_16_boost: 1.30

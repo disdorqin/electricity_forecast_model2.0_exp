@@ -301,6 +301,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate P0 realtime spike correction for a profile.",
     )
+    # Standard P0 CLI flags (accepted but not all used by this script)
+    parser.add_argument("--data-path", default=None, help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--runs-root", default=None, help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--target", default=None, help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--start-date", default=None, help="Ignored, kept for orchestrator compatibility")
+    parser.add_argument("--end-date", default=None, help="Ignored, kept for orchestrator compatibility")
+
     parser.add_argument(
         "--prediction-pack", required=True,
         help="Path to prediction pack CSV (with base_fused_pred, y_true, ...)",

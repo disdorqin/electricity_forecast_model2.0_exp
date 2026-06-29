@@ -1,8 +1,9 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 0.7 — PR #5 Conflict Resolution]`
-> **Runner branch**: `agent/p0-threshold-tuning`
+> **Purpose**: Track all tasks across the P0 full execution pipeline.
+> **Status**: `[Phase 1 — BLOCKED: No model predictions for P0 window]`
+> **Runner branch**: `agent/p0-full-execution-runner-clean`
 
 ---
 
@@ -107,6 +108,64 @@ Round-trip (all 24 hours):                      ✓
 | ID | Blocker | Status |
 |----|---------|--------|
 | B12 | SA2 ↔ SA3 file conflicts | ✅ RESOLVED in Phase 0.7 |
+| **B13** | **No model predictions for P0 window** | **OPEN** | No `daily_runs/` directory exists. Prediction pack has 0 rows, 120 missing dates. See Phase 1 Failure. |
+
+---
+
+---
+
+## Prediction Source Inventory
+
+| Field | Value |
+|-------|-------|
+| **Script** | `scripts/inventory_prediction_sources.py` |
+| **Run by** | SA2 (Path Compatibility) |
+| **Date** | 2026-06-29 |
+| **Output** | `reports/local/p0_full_run/inventory/prediction_source_inventory.md` |
+| **Output** | `reports/local/p0_full_run/inventory/prediction_source_inventory.json` |
+
+### Key Findings
+
+| Question | Answer |
+|----------|--------|
+| Which model is easiest for first prediction pack? | **LightGBM** — has checkpoint `models/LightGBM/best_model_实时电价.pkl`, CPU inference, ~5 min for 4 months |
+| Which are inference-only? | **LightGBM** (has checkpoint), **TimesFM** (pre-trained, needs GPU) |
+| Which must train? | **TimeMixer** (no checkpoint, no inference script), **SGDFNet** (no checkpoint), **RT916** (no checkpoint for P0 window) |
+| RT916 checkpoint status? | Only outputs for May–Jun 2026 (outside P0 window Nov–Feb) |
+| LightGBM baseline feasible? | **Yes** — has `infer_fix.py`, checkpoint exists, fastest path to first prediction pack |
+| Naive pack approach viable? | **Yes** — build from raw xlsx features + LightGBM predictions; fusion can produce `base_fused_pred` from single-model pack |
+
+### Model Readiness Summary
+
+| Model | Checkpoint | Inference | GPU | Est. Time | P0 Ready? |
+|-------|-----------|-----------|-----|-----------|-----------|
+| lightgbm | ✅ `best_model_实时电价.pkl` | ✅ `infer_fix.py` | ❌ | ~5 min | **✅ YES** |
+| timesfm | ❌ (pre-trained, needs legacy TF) | ✅ `infer.py` | ✅ | ~30 min | ❌ |
+| timemixer | ❌ (no .pt found) | ❌ | ✅ | Unknown | ❌ |
+| sgdfnet | ❌ (no .pth/.ckpt) | ✅ `pipeline.py` | ✅ | ~15 min | ❌ |
+| rt916 | ❌ (only May–Jun 2026) | ✅ `model.py` | ✅ | ~2 hr | ❌ |
+| fusion | ❌ (needs predictions first) | ❌ | ❌ | N/A | ❌ |
+
+### Recommended Path
+
+1. Run **LightGBM inference** (`lightGBM/infer_fix.py`) for Nov 2025 – Feb 2026
+2. Build prediction pack from LightGBM output
+3. Use fusion to produce `base_fused_pred` (single-model fused = LightGBM predictions)
+4. Proceed with spike correction evaluation
+
+---
+
+## Phase 1 Failure — Prediction Pack Build
+
+| Field | Value |
+|-------|-------|
+| **Command** | `python scripts/build_backtest_prediction_pack.py --data-path data/shandong_pmos_hourly.xlsx --runs-root daily_runs --runs-root-fallback outputs --target realtime --start-date 2025-11-01 --end-date 2026-02-28 --models all` |
+| **Error** | Prediction pack is empty (0 rows). 120 missing dates (all dates in Nov 2025 – Feb 2026). |
+| **Root Cause** | `daily_runs/` directory does not exist in project root. Available prediction CSVs (RT916, SGDFNet, TimesFM) only cover May–Jun 2026 (`oof_runs/`), not the P0 window (Nov 2025 – Feb 2026). Raw xlsx data exists at `data/shandong_pmos_hourly.xlsx` (2857 rows in P0 window) but contains only features and actual prices — no model predictions. |
+| **Files Involved** | `scripts/build_backtest_prediction_pack.py`, `data/shandong_pmos_hourly.xlsx` |
+| **Data Available** | Raw xlsx: 2857 rows in P0 window (Nov–Feb), realtime price + features. Model predictions: NONE for P0 window. |
+| **Can continue?** | **NO** — see blocker B13. Cannot proceed to Phase 2-4 without model predictions for evaluation. |
+| **Need support agent?** | **SA2/Path** (if daily_runs exists elsewhere), or **Other** (guidance on prediction source) |
 
 ---
 
@@ -125,15 +184,15 @@ Round-trip (all 24 hours):                      ✓
 | medium | 0.60 | 0.35 | 350 | 1.15 |
 | aggressive | 0.45 | 0.60 | 600 | 1.30 |
 
-## Phase 1-4 Execution — PENDING (Wait for PR #5 mergeable)
+## Phase 1-4 Execution — BLOCKED (No predictions for P0 window)
 
 | Phase | Script | Description | Status |
 |-------|--------|-------------|--------|
-| 1a | `build_realtime_spike_dataset.py` | Build spike labels + features | `PENDING` |
-| 1b | — | Validate label distribution | `PENDING` |
-| 2a | `train_realtime_spike_risk.py` | Train risk model | `PENDING` |
-| 2b | — | Validate AUC/recall/calibration | `PENDING` |
-| 3a | `evaluate_realtime_spike_correction.py` | Apply + evaluate correction | `PENDING` |
-| 3b | — | Conservative/medium/aggressive pass | `PENDING` |
-| 4a | `evaluate_p0_realtime_spike_full.py` | Unified evaluation | `PENDING` |
-| 4b | SA4 report | GO/NO-GO decision | `PENDING` |
+| 1a | `build_backtest_prediction_pack.py` | Build spike labels + features | ❌ **FAILED** — empty pack, 0 rows |
+| 1b | — | Validate label distribution | `SKIPPED` |
+| 2a | `diagnose_extreme_events.py` | Extreme event diagnostics | `SKIPPED` |
+| 2b | `diagnose_model_regime.py` | Model regime analysis | `SKIPPED` |
+| 3a | `build_realtime_spike_dataset.py` | Build spike training dataset | `SKIPPED` |
+| 3b | `train_realtime_spike_risk.py` | Train risk model | `SKIPPED` |
+| 4a | `evaluate_realtime_spike_correction.py` | Three-profile correction | `SKIPPED` |
+| 4b | `evaluate_p0_realtime_spike_full.py` | Full evaluation / GO-NOGO | `SKIPPED` |

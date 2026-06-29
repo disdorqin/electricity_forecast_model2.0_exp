@@ -34,6 +34,9 @@ daily_runs/
 daily_runs_*/
 ExtremPriceClf/daily_runs/
 
+# Generated analysis reports
+reports/
+
 # Ad-hoc scripts & outputs (not part of the project)
 run_*.py
 run_*.bat

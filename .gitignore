@@ -51,6 +51,7 @@ outputs/local/
 
 # Ad-hoc scripts & outputs (not part of the project)
 run_*.py
+!run_rolling_30d_fusion.py
 run_*.bat
 launch_*.py
 compute_*.py
@@ -76,3 +77,4 @@ Thumbs.db
 ion.dynamic_weights*
 _*.py
 test_*.py
+!tests/test_rolling_30d_fusion.py

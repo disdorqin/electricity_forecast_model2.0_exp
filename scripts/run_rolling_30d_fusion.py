@@ -354,9 +354,11 @@ def apply_weights(
             continue
 
         day_weights = weight_pivot.loc[bd]
-        if bd not in pred_pivot.index:
+        # Look up exact (bd, hb) tuple — avoids DataFrame vs Series ambiguity
+        try:
+            day_preds = pred_pivot.loc[(bd, hb)]
+        except KeyError:
             continue
-        day_preds = pred_pivot.loc[bd]
 
         fused = 0.0
         weight_dict: dict[str, float] = {}

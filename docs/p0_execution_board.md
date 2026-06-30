@@ -1,7 +1,7 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 2 COMPLETE — GO achieved — P3 in progress]`
+> **Status**: `[Phase 2 COMPLETE — GO achieved — P3 COMPLETE (NO-GO)]`
 > **Runner branch**: `agent/p0-threshold-tuning`
 
 ---
@@ -137,4 +137,15 @@ Round-trip (all 24 hours):                      ✓
 | 3b | — | Conservative/medium/aggressive pass | `PENDING` |
 | 4a | `evaluate_p0_realtime_spike_full.py` | Unified evaluation | `PENDING` |
 | 4b | SA4 report | GO/NO-GO decision | `PENDING` |
-| — | **P3** | **Rolling Fusion + Leakage Fix** | **ACTIVE** — see `docs/p3_execution_board.md` |
+| — | **P3** | **Rolling Fusion + Leakage Fix** | **COMPLETE (NO-GO)** — see `docs/p3_execution_board.md` |
+
+### P3 Summary
+
+| Mode | sMAPE | Severe | vs Phase 2 Best |
+|------|-------|--------|-----------------|
+| Rolling softmax | **19.86** | 83 | sMAPE -1.00 ✅, Severe +20 ❌ |
+| Rolling anchor_90 | 20.61 | 82 | sMAPE -0.25, Severe +19 ❌ |
+| Rolling convex | 23.70 | 152 | Both worse ❌ |
+| Phase 2 best | 20.86 | **63** | baseline |
+
+**Verdict**: NO-GO — rolling fusion improves sMAPE but regresses severe underestimates. Phase 2 best remains the champion.

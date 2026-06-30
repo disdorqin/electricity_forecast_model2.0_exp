@@ -1,7 +1,7 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 2 — COMPLETE: Anchored fusion correction GO achieved]`
+> **Status**: `[Phase 2.5 — SA1 COMPLETE — TRUSTED_WITH_LIMITATIONS — Wait for SA4]`
 > **Runner branch**: `agent/p0-phase2-anchored-fusion-run`
 
 ---
@@ -10,10 +10,10 @@
 
 | Role | Branch | Scope | Status |
 |------|--------|-------|--------|
-| **Runner (orchestrator)** | `agent/p0-full-execution-runner-clean` | Orchestrate P0 full run | `READY` |
-| **SA1 (Contract Fix)** | `origin/agent/p0-residual-lift-guardrail` | Contract unification | `✅ ALREADY ON tune-timemixer` |
-| **SA2 (Path Compat)** | `origin/agent/p0-path-compat` | P0 scripts + path compat | `✅ MERGED to tune-timemixer` |
-| **SA3 (Threshold Tuning)** | `origin/agent/p0-threshold-tuning` | Correction profile tuning | `🟡 CONFLICT RESOLVED — pending push` |
+| **Runner (orchestrator)** | `agent/p0-phase2-anchored-fusion-run` | Orchestrate P0 full run | `DONE — FROZEN` |
+| **SA1 (Contract Fix)** | `origin/agent/p0-residual-lift-guardrail` | Contract unification | `ON tune-timemixer` |
+| **SA2 (Path Compat)** | `origin/agent/p0-path-compat` | P0 scripts + path compat | `MERGED to tune-timemixer` |
+| **SA3 (Threshold Tuning)** | `agent/p0-phase2-anchored-fusion-run` | Correction profile tuning + anchored fusion | `COMPLETE — GO achieved` |
 | **SA4 (Final Report)** | `TBD` | Consolidation report | `PENDING` |
 
 ---
@@ -26,9 +26,9 @@
 | SA2 — Path Compatibility | ✅ Done | SA2 | Unified CLI flags; path resolution from daily_runs/ with outputs/ fallback |
 | SA3 — Residual Lift + Guardrail | ✅ Done | SA3 | Core correction pipeline built |
 | SA3 — Threshold Tuning | ✅ Done | SA3 | Profiles + evaluation scripts complete |
-| P0 Full Run (Offline Eval) | 🟡 Ready for Runner | — | Waiting for prediction pack and Runner launch |
-| Extreme Diagnostics | ✅ Scripts ready | SA2 | diagnose_extreme_events.py, diagnose_model_regime.py |
-| Spike Correction Pipeline | 🟡 Scripts ready | SA2/SA3 | build/train/predict/evaluate scripts |
+| P0 Full Run (Offline Eval) | Done | Runner | Phase 2 (anchored fusion) GO achieved |
+| Extreme Diagnostics | Done | SA2 | diagnose_extreme_events.py, diagnose_model_regime.py |
+| Spike Correction Pipeline | Done | SA2/SA3 | build/train/predict/evaluate scripts executed |
 | Window Coverage | ✅ Path manifest | SA2 | daily_runs/ + outputs/ fallback |
 
 ---
@@ -328,4 +328,79 @@ In Phase 1B, `base_fused_pred = y_pred` (single-model), blocked by negative-base
 | Blocker | Status |
 |---------|--------|
 | Correction not activating (Phase 1B) | ✅ RESOLVED via anchored fusion |
-| Multi-model pack needed for guardrail | ✅ RESOLVED via LightGBM-anchored baselines |
+| Multi-model pack needed for guardrail | [OK] RESOLVED via LightGBM-anchored baselines |
+
+---
+
+## Phase 2.5 — Final Audit Freeze
+
+> **Status**: `[FROZEN]`
+> **PR #9**: https://github.com/disdorqin/electricity_forecast_model2.0_exp/pull/9
+
+### Branch & Base
+
+| Field | Value |
+|-------|-------|
+| **Branch** | `agent/p0-phase2-anchored-fusion-run` |
+| **Base** | `origin/tune-timemixer` (`2656ea7`) |
+| **HEAD** | `be45d0d` |
+| **Commits vs base** | 10 commits |
+| **Files changed** | 14 (4 new, 10 modified) |
+
+### Best Candidate (Frozen)
+
+| Field | Value |
+|-------|-------|
+| **Fusion** | `lightgbm_anchor_90` (0.9 LGBM + 0.05 DA + 0.05 lag7) |
+| **Profile** | `medium` (p=0.60, lift=0.35/350, boost=1.15) |
+| **Correction mode** | `normal` |
+| **sMAPE** | 20.86 (vs LightGBM baseline 22.02, -1.16) |
+| **Severe underestimates** | 63 (vs LightGBM baseline 80, -21%) |
+| **False lift rate** | 7.0% (under 15% GO threshold) |
+| **Normal hours degradation** | -0.33 (improvement) |
+| **Lift applied** | 225 timestamps (7.8%) |
+| **Verdict** | **Offline GO** |
+
+### Forbidden File Audit
+
+| Category | Status | Details |
+|----------|--------|---------|
+| `reports/local/*` | CLEAN | Not committed |
+| `data/*.csv / *.xlsx` | CLEAN | Not committed |
+| `*.pkl` (models/checkpoints) | CLEAN | Not committed |
+| `production_pipeline.py` | UNMODIFIED | Not in diff |
+| `validation_tap.py` | UNMODIFIED | Not in diff |
+| Base model training entries | UNMODIFIED | Not in diff |
+
+### Blockers (Remaining)
+
+| ID | Blocker | Status | Details |
+|----|---------|--------|---------|
+| **B14** | SA1 leakage/metric audit | ⚠️ **TRUSTED_WITH_LIMITATIONS** | See audit report at `docs/reports/P0_phase2_leakage_metric_audit.md` |
+| **B15** | SA4 final GO/NO-GO report | PENDING | Waiting for SA4 |
+| **B16** | PR #9 merge blocked | WAITING for B14 + B15 | B14 resolved, waiting for B15 |
+
+### SA1 Audit Summary
+
+| Dimension | Verdict |
+|-----------|---------|
+| Leakage (correction pipeline) | ✅ **CLEAN** — no actual-value columns used as prediction-time features |
+| Leakage (risk model training) | ⚠️ **FIXES NEEDED** — ACTUAL_COLS not excluded from spike risk training features; placeholder script uses y_true |
+| Business time mapping | ✅ **CORRECT** — `hour=0→hb=24, business_day=D-1` consistently applied |
+| Timestamp-level metrics | ✅ **CORRECT** — GO decisions use deduplicated (1 row per timestamp) metrics |
+| Correction mode | ✅ **CORRECT** — GO uses `normal` mode; `relaxed` correctly marked offline-only |
+| **Trust level** | **TRUSTED_WITH_LIMITATIONS** |
+
+### Required Fixes (P1)
+
+| ID | File | Fix |
+|----|------|-----|
+| FIX-01 | `scripts/train_realtime_spike_risk.py:94-96` | Add all 10 Chinese ACTUAL_COLS to `exclude_cols` |
+| FIX-02 | `scripts/predict_realtime_spike_risk.py:82-87` | Replace y_true-based placeholder with proper model inference or forecast-error heuristic |
+
+### Next Actions
+
+1. ✅ SA1 leakage/metric audit complete — TRUSTED_WITH_LIMITATIONS
+2. Wait for SA4 final GO/NO-GO report (B15)
+3. Once B15 clear: merge PR #9 to `tune-timemixer`
+4. SA2: Apply FIX-01 and FIX-02 in separate PR

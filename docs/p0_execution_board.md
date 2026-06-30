@@ -107,6 +107,65 @@ Round-trip (all 24 hours):                      ✓
 | ID | Blocker | Status |
 |----|---------|--------|
 | B12 | SA2 ↔ SA3 file conflicts | ✅ RESOLVED in Phase 0.7 |
+| **B13** | **No model predictions for P0 window** | **RESOLVED** | LightGBM inference + baseline pack + multi-candidate fusion bypasses daily_runs dependency |
+
+---
+
+## Prediction Source Inventory (SA2 - 2026-06-29)
+
+**Script**: `scripts/inventory_prediction_sources.py` → `reports/local/p0_full_run/inventory/`
+
+| Question | Answer |
+|----------|--------|
+| Easiest model for first pack? | **LightGBM** — checkpoint at `models/LightGBM/best_model_实时电价.pkl`, CPU, ~5 min |
+| Inference-only models? | LightGBM (has checkpoint), TimesFM (pre-trained, needs GPU) |
+| Must-train models? | TimeMixer, SGDFNet, RT916 (no checkpoints for P0 window) |
+| RT916 status? | Only May-Jun 2026 outputs (outside P0 Nov-Feb) |
+
+---
+
+## Phase 1B — Long-Run Bootstrap (2026-06-29)
+
+> Full pipeline executed end-to-end using Level 1 (LightGBM) predictions.
+> Pipeline works but **correction not activating** on single-model pack.
+
+| Loop | Task | Script | Status |
+|------|------|--------|--------|
+| 1 | Prediction source inventory | `inventory_prediction_sources.py` | ✅ Done |
+| 2 | Level 0 baseline pack (4 models) | `build_baseline_prediction_pack.py` | ✅ Done |
+| 3 | Level 1 LightGBM (1 model) | `run_p0_lightweight_predictions.py` | ✅ Done |
+| 4 | RT916 selective plan | `rt916_selective_plan.md` | ✅ Deferred |
+| 5a | Extreme diagnostics | `diagnose_extreme_events.py` | ✅ Done |
+| 5b | Spike dataset | `build_realtime_spike_dataset.py` | ✅ Done |
+| 5c | Train risk model (AUC 0.929) | `train_realtime_spike_risk.py` | ✅ Done |
+| 5d | Evaluate correction | `evaluate_realtime_spike_correction.py` | ✅ Done |
+
+**Bottleneck**: Single-model pack → `base_fused_pred = y_pred` → no correction lift.
+
+---
+
+## Phase 1C — Multi-Candidate Correction (SA2, 2026-06-29)
+
+> **Script**: `scripts/build_multicandidate_pack.py`
+> **Pack**: lightgbm + naive_lag1 + naive_lag7 + dayahead_proxy fused via mean
+> **11,433 rows** (2,880 timestamps × ~4 models), 121 business days, MAE=96.49
+
+### Correction Results (deduplicated — 1 row per timestamp)
+
+| Metric | Base | conservative | **medium** | aggressive |
+|--------|------|-------------|-----------|------------|
+| sMAPE (floor50) | 26.43 | 26.43 | **25.67** | 26.32 |
+| Severe underestimates | 150 | 150 | **125** | 84 |
+| Lift applied (timestamps) | — | 11 (0.4%) | **234 (8.1%)** | 2292 (79.6%) |
+| False lift rate | — | 0.38% | **8.12%** | 79.58% |
+| Normal hours sMAPE | 22.50 | 22.50 | **22.31** | 22.19 |
+| Normal hrs Δ (vs base) | — | 0.00 | **−0.19** | −0.31 |
+
+### Winner: medium profile
+
+- sMAPE ↓0.76 (best), severe underestimates ↓16.7%, false lift 8.12%
+- Normal hours improve (Δ−0.19) — no degradation
+- ✅ **GO** — balanced risk/reward
 
 ---
 
@@ -125,15 +184,11 @@ Round-trip (all 24 hours):                      ✓
 | medium | 0.60 | 0.35 | 350 | 1.15 |
 | aggressive | 0.45 | 0.60 | 600 | 1.30 |
 
-## Phase 1-4 Execution — PENDING (Wait for PR #5 mergeable)
+## Next Steps
 
-| Phase | Script | Description | Status |
-|-------|--------|-------------|--------|
-| 1a | `build_realtime_spike_dataset.py` | Build spike labels + features | `PENDING` |
-| 1b | — | Validate label distribution | `PENDING` |
-| 2a | `train_realtime_spike_risk.py` | Train risk model | `PENDING` |
-| 2b | — | Validate AUC/recall/calibration | `PENDING` |
-| 3a | `evaluate_realtime_spike_correction.py` | Apply + evaluate correction | `PENDING` |
-| 3b | — | Conservative/medium/aggressive pass | `PENDING` |
-| 4a | `evaluate_p0_realtime_spike_full.py` | Unified evaluation | `PENDING` |
-| 4b | SA4 report | GO/NO-GO decision | `PENDING` |
+| Step | Action | Status |
+|------|--------|--------|
+| 1 | Retrain risk model on multi-candidate data (improve score separation) |  |
+| 2 | Run `evaluate_p0_realtime_spike_full.py` unified evaluation |  |
+| 3 | SA4 final report / GO-NOGO |  |
+| 4 | PR: merge multi-candidate pack builder |  |

@@ -55,7 +55,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from extreme.realtime_high_spike.apply_correction import (
+    CorrectionMode,
     CorrectionProfile,
+    diagnose_zero_lift,
     get_profile,
     load_profile_config,
     run_correction,
@@ -407,6 +409,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--profile-config",
                         default="config/p0_spike_correction_profiles.yaml",
                         help="Profile config file (YAML or JSON)")
+    parser.add_argument(
+        "--correction-mode", default="normal",
+        choices=["normal", "relaxed"],
+        help=(
+            "Correction strictness. 'relaxed' lowers thresholds to ensure lift fires on "
+            "high-prob hours. Offline-only, do NOT use in production. (default: normal)"
+        ),
+    )
 
     # --- Explicit overrides ---
     parser.add_argument("--spike-prob-threshold", type=float, default=None)
@@ -465,6 +475,16 @@ def main() -> None:
         if rp_path is None or not rp_path.exists():
             sys.exit("Error: risk predictions not found. Provide --risk-predictions or use --steps for orchestrator mode.")
 
+        # Resolve correction mode
+        try:
+            correction_mode = CorrectionMode(args.correction_mode)
+        except ValueError:
+            sys.exit(f"Error: invalid --correction-mode '{args.correction_mode}'. "
+                     f"Choose 'normal' or 'relaxed'.")
+
+        if correction_mode.is_relaxed():
+            print("\n  ⚠  RELAXED mode enabled — offline-only, do NOT use in production.\n")
+
         hist_path = Path(args.history) if args.history else None
         config_path = args.profile_config
 
@@ -488,10 +508,18 @@ def main() -> None:
 
         for pname in profiles:
             print(f"\n{'='*60}")
-            print(f"  Profile: {pname}")
+            print(f"  Profile: {pname}  |  mode={correction_mode.value}")
             print(f"{'='*60}")
 
-            profile = get_profile(pname, config_path=config_path, overrides=overrides)
+            profile = get_profile(
+                pname, config_path=config_path,
+                overrides=overrides, mode=correction_mode,
+            )
+            eff = profile.to_dict_effective()
+            print(f"  Effective thresholds:")
+            print(f"    spike_prob_threshold → {eff.get('effective_spike_prob_threshold', '?')}")
+            print(f"    lift_floor           → {eff.get('lift_floor_applied', 0)}")
+
             out_dir = Path(args.out_dir) / pname
 
             metrics = run_evaluation(
@@ -509,6 +537,13 @@ def main() -> None:
             print(f"  high_spike MAE:           {metrics.get('high_spike_mae', 'N/A')}")
             print(f"  false_lift_rate:          {metrics.get('false_lift_rate', 'N/A')}")
             print(f"  normal_hours_degradation: {metrics.get('normal_hours_degradation', 'N/A')}")
+            print(f"  lift_applied_count:       {metrics.get('lift_applied_count', 'N/A')}")
+
+            # Diagnose zero-lift rows
+            result_csv = out_dir / "correction_result.csv"
+            if result_csv.exists():
+                result_df = pd.read_csv(result_csv)
+                diagnose_zero_lift(result_df, top_n=10)
 
         if len(profiles) > 1:
             summary_path = Path(args.out_dir) / "all_profiles_summary.json"

@@ -111,8 +111,6 @@ Round-trip (all 24 hours):                      ✓
 
 ---
 
----
-
 ## Prediction Source Inventory
 
 | Field | Value |

@@ -3,6 +3,8 @@
 > **Purpose**: Track all tasks across the P3 execution pipeline.
 > **Status**: `[P3a COMPLETE — P3b RUN COMPLETE (NO-GO) — P3c SCOPED — P3d EVALUATED (NO-GO)]`
 > **Branch**: `agent/p3-rolling-fusion-sota`
+> **Verdict**: PR #10 = tooling/leakage-fix/experiment framework merge, NOT a new deployment candidate.
+>   Current deployment candidate remains Phase 2: `lightgbm_anchor_90` + `medium` + `normal`.
 
 ---
 

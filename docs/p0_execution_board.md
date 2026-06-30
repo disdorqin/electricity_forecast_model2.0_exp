@@ -1,8 +1,8 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 2.5 — SA4 COMPLETE — OFFLINE GO / PRODUCTION CONDITIONAL]`
-> **Runner branch**: `agent/p0-phase2-anchored-fusion-run`
+> **Status**: `[Phase 2 COMPLETE — GO achieved — P3 in progress]`
+> **Runner branch**: `agent/p0-threshold-tuning`
 
 ---
 
@@ -405,3 +405,19 @@ In Phase 1B, `base_fused_pred = y_pred` (single-model), blocked by negative-base
 3. Merge PR #9 to `tune-timemixer`
 4. SA2: Apply FIX-01 and FIX-02 in separate PR
 5. → P3: Multi-model predictions + ledger validation
+
+---
+
+## P3 — Rolling Fusion + Leakage Fix (Active)
+
+| Phase | Script | Description | Status |
+|-------|--------|-------------|--------|
+| 1a | `build_realtime_spike_dataset.py` | Build spike labels + features | `PENDING` |
+| 1b | — | Validate label distribution | `PENDING` |
+| 2a | `train_realtime_spike_risk.py` | Train risk model | `PENDING` |
+| 2b | — | Validate AUC/recall/calibration | `PENDING` |
+| 3a | `evaluate_realtime_spike_correction.py` | Apply + evaluate correction | `PENDING` |
+| 3b | — | Conservative/medium/aggressive pass | `PENDING` |
+| 4a | `evaluate_p0_realtime_spike_full.py` | Unified evaluation | `PENDING` |
+| 4b | SA4 report | GO/NO-GO decision | `PENDING` |
+| — | **P3** | **Rolling Fusion + Leakage Fix** | **ACTIVE** — see `docs/p3_execution_board.md` |

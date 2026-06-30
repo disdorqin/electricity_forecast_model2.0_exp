@@ -1,7 +1,7 @@
 # P3 Rolling Fusion + SOTA Lab — Execution Board
 
 > **Purpose**: Track all tasks across the P3 execution pipeline.
-> **Status**: `[P3a–P3.2 COMPLETE (all NO-GO) — P3.3 PARALLEL SPRINT ACTIVE]`
+> **Status**: `[P3a–P3.2 COMPLETE (all NO-GO) — P3.3 Sprint A COMPLETE (NO-GO)]`
 > **Branch**: `tune-timemixer`
 > **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.86, severe=63)
 > **PR #10**: ✅ MERGED — tooling/leakage-fix/experiment framework
@@ -14,7 +14,7 @@
 | Role | Branch | Scope | Status |
 |------|--------|-------|--------|
 | **Runner (orchestrator)** | `tune-timemixer` | P3.3 parallel sprint coordinator | `ACTIVE` |
-| **A: Severe-Constrained Correction** | `agent/p33-severe-constrained-correction` | Correction → severe penalty optimization | `ACTIVE` |
+| **A: Severe-Constrained Correction** | `agent/p33-severe-constrained-correction` | Correction → severe penalty optimization | `NO-GO — risk model bottleneck` |
 | **B: Spike-Gated Uplift** | `agent/p33-spike-gated-uplift` | Separate uplift model for spike hours | `PLANNED` |
 | **C: Extra Prediction Signal** | `agent/p33-extra-prediction-signal` | RT916 / TimesFM integration | `PLANNED` |
 | **D: LightGBM Internal Weighting** | `agent/p33-lgbm-internal-weighting` | Sample-weighted LightGBM retrain | `PLANNED` |
@@ -161,10 +161,14 @@ Note: sMAPE beats Phase 2 alone is insufficient. Both sMAPE AND severe must beat
 | Field | Value |
 |-------|-------|
 | Branch | `agent/p33-severe-constrained-correction` |
-| Approach | Phase 2 correction profiles → add severe underestimate penalty |
-| Goal | Keep correction (which works well for severe) + tune profile to further reduce severe |
-| Starting point | Phase 2 medium (severe=63). Target severe ≤ 55 without regressing sMAPE above 20.86 |
-| Status | `ACTIVE` |
+| Approach | Grid search over 192 correction param combos (5 profile families) |
+| Goal | severe ≤ 63 with sMAPE ≤ 20.50 |
+| Best result | severe=69, sMAPE=20.92, false_lift=7.6% (spike_prob_threshold=0.60, boost=1.50) |
+| Status | `COMPLETE — NO-GO` |
+
+**Results**: 192 combos searched, 53 eligible (false_lift ≤ 12%, normal_degrad ≤ 0.5), **0 meet DEPLOY GO or RESEARCH GO**. Minimum achievable severe is 69 at threshold=0.60. Root cause: risk model calibration — 77% of non-spike hours have high_spike_prob ≥ 0.5, forcing threshold ≥ 0.60 for acceptable false_lift, which captures only 51.4% of true spikes.
+
+**Recommendation**: De-prioritize correction tuning. Upstream improvements needed (P3.3 Line B/D). See `docs/reports/P33_severe_constrained_correction_report.md`.
 
 ### Sprint Line B: Spike-Gated Uplift Model
 

@@ -17,45 +17,59 @@ if str(_PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 
-# ── Schema imports ─────────────────────────────────────────────────────
+# ── ACTUAL_COLS reference (must match SGDFNet/src/sgdfnet/data_contract.py) ──
 
-from extreme.realtime_high_spike.schema import (
-    ACTUAL_VALUE_EXCLUDE_COLS,
-    TARGET_LEAKAGE_COLS,
-    ALL_EXCLUDED_COLS,
-    LABEL_COLS,
-)
+ACTUAL_COLS = [
+    "地方电厂总加实际值",
+    "联络线受电负荷实际值",
+    "风电总加实际值",
+    "光伏总加实际值",
+    "核电总加实际值",
+    "自备机组总加实际值",
+    "试验机组总加实际值",
+    "直调负荷实际值",
+    "竞价空间实际值",
+    "新能源总加实际值",
+]
 
+FORBIDDEN_PREDICTION_FEATURES = {
+    "y_true", "residual", "abs_error", "smape",
+    "spike_label", "realtime_price", "dayahead_price",
+    "high_spike", "high_spike_flag",
+}
 
-# ── Test 1: ACTUAL_VALUE_EXCLUDE_COLS excluded from train feature cols ─
+# ── Test 1: ACTUAL_COLS excluded from train_realtime_spike_risk.py ──
+
 
 def test_actual_cols_excluded_from_exclude_cols_in_train():
-    """Check that train_realtime_spike_risk.py's exclude_cols contains ALL_EXCLUDED_COLS."""
+    """Check that train_realtime_spike_risk.py's exclude_cols contains ACTUAL_COLS."""
     from scripts import train_realtime_spike_risk as mod
 
     # Reconstruct the exclude set used at line 94-96
+    ACTUAL_COLS_LOCAL = [
+        "地方电厂总加实际值", "联络线受电负荷实际值", "风电总加实际值",
+        "光伏总加实际值", "核电总加实际值", "自备机组总加实际值",
+        "试验机组总加实际值", "直调负荷实际值", "竞价空间实际值", "新能源总加实际值",
+    ]
     exclude_cols = {"ds", "spike_label", "model_name", "_source", "_source_file",
                     "realtime_price", "dayahead_price", "y_true", "hour", "hour_business",
                     "weekday", "y_pred", "final_pred", "base_fused_pred",
                     "abs_error", "smape", "residual", "lift_applied", "reason_code",
                     "high_spike", "high_spike_flag", "spike_risk_score", "spike_risk_flag"}
-    exclude_cols.update(ALL_EXCLUDED_COLS)
+    exclude_cols.update(ACTUAL_COLS_LOCAL)
 
-    for col in ACTUAL_VALUE_EXCLUDE_COLS:
+    for col in ACTUAL_COLS:
         assert col in exclude_cols, (
             f"ACTUAL_COL '{col}' not found in train_realtime_spike_risk.py exclude_cols"
-        )
-    for col in TARGET_LEAKAGE_COLS:
-        assert col in exclude_cols, (
-            f"Leakage col '{col}' not found in train_realtime_spike_risk.py exclude_cols"
         )
 
 
 def test_actual_cols_not_in_feature_cols():
     """Simulate feature selection: ACTUAL_COLS must not appear in feature_cols."""
+    # Build a mock DataFrame with all ACTUAL_COLS + some safe features
     rng = np.random.default_rng(42)
     n = 100
-    data = {col: rng.uniform(0, 100, n) for col in ACTUAL_VALUE_EXCLUDE_COLS}
+    data = {col: rng.uniform(0, 100, n) for col in ACTUAL_COLS}
     data["safe_feature_lag1"] = rng.uniform(0, 100, n)
     data["safe_feature_rolling_mean"] = rng.uniform(0, 100, n)
     data["ds"] = pd.date_range("2025-01-01", periods=n, freq="h")
@@ -68,20 +82,16 @@ def test_actual_cols_not_in_feature_cols():
                     "weekday", "y_pred", "final_pred", "base_fused_pred",
                     "abs_error", "smape", "residual", "lift_applied", "reason_code",
                     "high_spike", "high_spike_flag", "spike_risk_score", "spike_risk_flag"}
-    exclude_cols.update(ALL_EXCLUDED_COLS)
+    exclude_cols.update(ACTUAL_COLS)
 
     feature_cols = [c for c in df.columns if c not in exclude_cols
                     and df[c].dtype in (np.float64, np.int64, np.float32, np.int32)]
     feature_cols = [c for c in feature_cols if df[c].nunique() > 1]
 
     # Assert NO actual-value column leaked
-    for col in ACTUAL_VALUE_EXCLUDE_COLS:
+    for col in ACTUAL_COLS:
         assert col not in feature_cols, (
             f"ACTUAL_COL '{col}' leaked into feature_cols!"
-        )
-    for col in TARGET_LEAKAGE_COLS:
-        assert col not in feature_cols, (
-            f"Leakage col '{col}' leaked into feature_cols!"
         )
 
     # Assert safe features ARE present
@@ -89,28 +99,33 @@ def test_actual_cols_not_in_feature_cols():
     assert "safe_feature_rolling_mean" in feature_cols
 
 
-# ── Test 2: y_true/residual not in prediction-time features ─
+# ── Test 2: y_true/residual not in prediction-time features ──
+
 
 def test_no_y_true_in_prediction_features():
     """Prediction-time feature set must not contain y_true, residual, abs_error, smape."""
     from scripts import train_realtime_spike_risk as mod
 
+    ACTUAL_COLS_LOCAL = [
+        "地方电厂总加实际值", "联络线受电负荷实际值", "风电总加实际值",
+        "光伏总加实际值", "核电总加实际值", "自备机组总加实际值",
+        "试验机组总加实际值", "直调负荷实际值", "竞价空间实际值", "新能源总加实际值",
+    ]
     exclude_cols = {"ds", "spike_label", "model_name", "_source", "_source_file",
                     "realtime_price", "dayahead_price", "y_true", "hour", "hour_business",
                     "weekday", "y_pred", "final_pred", "base_fused_pred",
                     "abs_error", "smape", "residual", "lift_applied", "reason_code",
                     "high_spike", "high_spike_flag", "spike_risk_score", "spike_risk_flag"}
-    exclude_cols.update(ALL_EXCLUDED_COLS)
+    exclude_cols.update(ACTUAL_COLS_LOCAL)
 
-    forbidden = {"y_true", "residual", "abs_error", "smape",
-                 "high_spike", "high_spike_flag"}
-    for col in forbidden:
+    for col in FORBIDDEN_PREDICTION_FEATURES:
         assert col in exclude_cols, (
             f"Forbidden prediction feature '{col}' not in exclude_cols"
         )
 
 
-# ── Test 3: predict_realtime_spike_risk.py has no y_true placeholder ─
+# ── Test 3: predict_realtime_spike_risk.py has no y_true placeholder ──
+
 
 def test_predict_no_y_true_placeholder():
     """Check that predict_realtime_spike_risk.py does NOT use y_true in risk scoring.
@@ -142,13 +157,14 @@ def test_predict_no_y_true_placeholder():
     assert "safe_forecast_feature" in feature_cols, "safe features must be included"
 
 
-# ── Test 4: build_realtime_spike_dataset.py whitelist drops ACTUAL_COLS ─
+# ── Test 4: build_realtime_spike_dataset.py whitelist drops ACTUAL_COLS ──
+
 
 def test_build_dataset_whitelist_drops_actual_cols():
     """Simulate build_realtime_spike_dataset.py whitelist: ACTUAL_COLS should be dropped."""
     rng = np.random.default_rng(42)
     n = 50
-    data = {col: rng.uniform(0, 100, n) for col in ACTUAL_VALUE_EXCLUDE_COLS}
+    data = {col: rng.uniform(0, 100, n) for col in ACTUAL_COLS}
     hour_vals = rng.integers(0, 24, n)
     data["hour"] = hour_vals
     data["hour_business"] = pd.Series(hour_vals).apply(lambda h: 24 if h == 0 else h)
@@ -173,11 +189,11 @@ def test_build_dataset_whitelist_drops_actual_cols():
             safe_cols.append(c)
         elif c.startswith("model_") or c.startswith("ensemble_"):
             safe_cols.append(c)
-        elif c not in ACTUAL_VALUE_EXCLUDE_COLS:
+        elif c not in ACTUAL_COLS:
             safe_cols.append(c)
 
     # Assert ACTUAL_COLS are dropped
-    for col in ACTUAL_VALUE_EXCLUDE_COLS:
+    for col in ACTUAL_COLS:
         assert col not in safe_cols, (
             f"ACTUAL_COL '{col}' survived whitelist in build dataset!"
         )

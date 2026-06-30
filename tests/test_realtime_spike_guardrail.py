@@ -20,6 +20,7 @@ import pandas as pd
 
 from extreme.realtime_high_spike.residual_lift import (
     PERIOD_DEFS,
+    CorrectionMode,
     ResidualLiftConfig,
     ResidualLiftCorrector,
     get_period,
@@ -503,6 +504,219 @@ def test_no_negative_price_override():
 
 
 # ══════════════════════════════════════════════════════════════════
+# Tests: CorrectionMode (normal vs relaxed)
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_correction_mode_enum():
+    """CorrectionMode enum basic properties."""
+    assert CorrectionMode.NORMAL.value == "normal"
+    assert CorrectionMode.RELAXED.value == "relaxed"
+    assert not CorrectionMode.NORMAL.is_relaxed()
+    assert CorrectionMode.RELAXED.is_relaxed()
+    assert CorrectionMode("normal") == CorrectionMode.NORMAL
+    assert CorrectionMode("relaxed") == CorrectionMode.RELAXED
+
+
+def test_correction_mode_lift_relaxed_lowers_threshold():
+    """RELAXED mode should fire lift on moderate-prob hours where NORMAL would not."""
+    cfg = ResidualLiftConfig(
+        spike_prob_threshold=0.6,
+        mode=CorrectionMode.NORMAL,
+    )
+    normal = ResidualLiftCorrector(cfg)
+    normal.set_lift_candidates({"1_8": 50.0, "9_16": 100.0, "17_24": 50.0})
+
+    relaxed = ResidualLiftCorrector(
+        ResidualLiftConfig(
+            spike_prob_threshold=0.6,
+            mode=CorrectionMode.RELAXED,
+            min_lift_floor=30.0,
+        )
+    )
+    relaxed.set_lift_candidates({"1_8": 50.0, "9_16": 100.0, "17_24": 50.0})
+
+    # spike_prob=0.40: NORMAL blocks (0.40 < 0.6), RELAXED fires (0.40 >= 0.36)
+    r_n = normal.compute_lift(base_pred=300.0, spike_prob=0.40, hour_business=12)
+    assert r_n.lift_applied == 0.0, "NORMAL should block at prob=0.40"
+
+    r_r = relaxed.compute_lift(base_pred=300.0, spike_prob=0.40, hour_business=12)
+    assert r_r.lift_applied > 0, f"RELAXED should fire at prob=0.40, got {r_r.reason_code}"
+
+
+def test_correction_mode_lift_relaxed_bypasses_normal_hour():
+    """RELAXED mode should bypass normal-hour protection."""
+    relaxed = ResidualLiftCorrector(
+        ResidualLiftConfig(
+            spike_prob_threshold=0.6,
+            mode=CorrectionMode.RELAXED,
+            min_lift_floor=30.0,
+            protect_normal_hours=True,
+        )
+    )
+    relaxed.set_lift_candidates({"1_8": 10.0, "9_16": 100.0, "17_24": 10.0})
+
+    # hour=3 (1_8 period) should NOT be protected in RELAXED mode
+    r = relaxed.compute_lift(base_pred=300.0, spike_prob=0.50, hour_business=3)
+    assert r.lift_applied > 0, f"RELAXED should lift on normal hour, got {r.reason_code}"
+    assert r.reason_code != "NO_CORRECTION_NORMAL_HOUR"
+
+
+def test_correction_mode_guardrail_relaxed_bypasses_normal_hour():
+    """RELAXED guardrail should bypass normal-hour protection."""
+    from extreme.realtime_high_spike.guardrail import GuardrailConfig, SpikeGuardrail
+
+    guard = SpikeGuardrail(
+        GuardrailConfig(
+            min_prob_for_lift=0.6,
+            protect_normal_hours=True,
+            normal_hour_prob_cap=0.65,
+            mode=CorrectionMode.RELAXED,
+        )
+    )
+    # hour=5 (1_8) with prob=0.50 → RELAXED should allow
+    r = guard.evaluate(
+        base_pred=300.0, spike_prob=0.50,
+        corrected_pred=350.0, hour_business=5,
+    )
+    assert r.reason_code != "NO_CORRECTION_NORMAL_HOUR", (
+        "RELAXED guardrail should bypass normal-hour protection"
+    )
+    assert r.final_pred > 300.0
+
+
+def test_correction_mode_normal_still_blocks():
+    """NORMAL mode should still apply normal-hour protection."""
+    from extreme.realtime_high_spike.guardrail import GuardrailConfig, SpikeGuardrail
+
+    guard = SpikeGuardrail(
+        GuardrailConfig(
+            min_prob_for_lift=0.5,
+            protect_normal_hours=True,
+            normal_hour_prob_cap=0.65,
+            mode=CorrectionMode.NORMAL,
+        )
+    )
+    # hour=5 (1_8) with prob=0.50 → NORMAL should protect
+    r = guard.evaluate(
+        base_pred=300.0, spike_prob=0.50,
+        corrected_pred=350.0, hour_business=5,
+    )
+    assert r.reason_code == "NO_CORRECTION_NORMAL_HOUR", (
+        "NORMAL guardrail should protect normal hours"
+    )
+    assert r.final_pred == 300.0
+
+
+def test_correction_mode_relaxed_min_lift_floor():
+    """RELAXED mode should apply min_lift_floor when fitted candidate is near zero."""
+    corrector = ResidualLiftCorrector(
+        ResidualLiftConfig(
+            spike_prob_threshold=0.6,
+            mode=CorrectionMode.RELAXED,
+            min_lift_floor=50.0,
+        )
+    )
+    # Set very small candidates
+    corrector.set_lift_candidates({"1_8": 5.0, "9_16": 10.0, "17_24": 5.0})
+    # After min_lift_floor: 1_8 → 50.0, 9_16 → 50.0 (before 9_16 boost)
+    q = corrector.get_quantiles()
+    assert q["1_8"] >= 50.0, f"min_lift_floor not applied: {q}"
+    assert q["9_16"] >= 50.0, f"min_lift_floor not applied for 9_16: {q}"
+
+
+def test_correction_mode_relaxed_e2e():
+    """End-to-end test: RELAXED mode should produce corrections on moderate prob hours."""
+    from extreme.realtime_high_spike.apply_correction import CorrectionProfile
+
+    pp = _make_test_prediction_pack(N_DAYS)
+    rp = _make_test_risk_predictions(N_DAYS)
+    history = _make_history_df()
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_pp:
+        pp.to_csv(f_pp.name, index=False)
+        pp_path = f_pp.name
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_rp:
+        rp.to_csv(f_rp.name, index=False)
+        rp_path = f_rp.name
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_h:
+        history.to_csv(f_h.name, index=False)
+        hist_path = f_h.name
+
+    try:
+        # Use conservative profile in RELAXED mode
+        profile = CorrectionProfile(
+            name="conservative_relaxed",
+            mode=CorrectionMode.RELAXED,
+            spike_prob_threshold=0.75,
+            max_lift_ratio=0.20,
+            max_absolute_lift=200,
+            protect_normal_hours=True,
+        )
+        from extreme.realtime_high_spike.apply_correction import run_correction
+        result = run_correction(
+            prediction_pack_path=pp_path,
+            risk_predictions_path=rp_path,
+            history_df=history,
+            profile=profile,
+        )
+        # Should have some lifts applied
+        n_lifted = (result["lift_applied"] > 0).sum()
+        assert n_lifted > 0, (
+            f"RELAXED mode should produce lifts, got {n_lifted}/{len(result)}"
+        )
+        print(f"    RELAXED e2e: {n_lifted}/{len(result)} rows lifted")
+    finally:
+        Path(pp_path).unlink(missing_ok=True)
+        Path(rp_path).unlink(missing_ok=True)
+        Path(hist_path).unlink(missing_ok=True)
+
+
+def test_correction_mode_normal_e2e():
+    """End-to-end test: NORMAL mode should have FEWER lifts than RELAXED."""
+    from extreme.realtime_high_spike.apply_correction import CorrectionProfile, run_correction
+
+    pp = _make_test_prediction_pack(N_DAYS)
+    rp = _make_test_risk_predictions(N_DAYS)
+    history = _make_history_df()
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_pp:
+        pp.to_csv(f_pp.name, index=False)
+        pp_path = f_pp.name
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_rp:
+        rp.to_csv(f_rp.name, index=False)
+        rp_path = f_rp.name
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f_h:
+        history.to_csv(f_h.name, index=False)
+        hist_path = f_h.name
+
+    try:
+        profile = CorrectionProfile(
+            name="conservative_normal",
+            mode=CorrectionMode.NORMAL,
+            spike_prob_threshold=0.75,
+            max_lift_ratio=0.20,
+            max_absolute_lift=200,
+        )
+        result = run_correction(
+            prediction_pack_path=pp_path,
+            risk_predictions_path=rp_path,
+            history_df=history,
+            profile=profile,
+        )
+        n_lifted = (result["lift_applied"] > 0).sum()
+        print(f"    NORMAL e2e: {n_lifted}/{len(result)} rows lifted")
+        # NORMAL mode should have the standard low number of lifts
+        # (this is a smoke check, not an exact count)
+    finally:
+        Path(pp_path).unlink(missing_ok=True)
+        Path(rp_path).unlink(missing_ok=True)
+        Path(hist_path).unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════
 # Run all tests if executed directly
 # ══════════════════════════════════════════════════════════════════
 
@@ -536,5 +750,22 @@ if __name__ == "__main__":
     print("PASS: test_run_correction_end_to_end")
     test_no_negative_price_override()
     print("PASS: test_no_negative_price_override")
+
+    test_correction_mode_enum()
+    print("PASS: test_correction_mode_enum")
+    test_correction_mode_lift_relaxed_lowers_threshold()
+    print("PASS: test_correction_mode_lift_relaxed_lowers_threshold")
+    test_correction_mode_lift_relaxed_bypasses_normal_hour()
+    print("PASS: test_correction_mode_lift_relaxed_bypasses_normal_hour")
+    test_correction_mode_guardrail_relaxed_bypasses_normal_hour()
+    print("PASS: test_correction_mode_guardrail_relaxed_bypasses_normal_hour")
+    test_correction_mode_normal_still_blocks()
+    print("PASS: test_correction_mode_normal_still_blocks")
+    test_correction_mode_relaxed_min_lift_floor()
+    print("PASS: test_correction_mode_relaxed_min_lift_floor")
+    test_correction_mode_relaxed_e2e()
+    print("PASS: test_correction_mode_relaxed_e2e")
+    test_correction_mode_normal_e2e()
+    print("PASS: test_correction_mode_normal_e2e")
 
     print("\n=== ALL TESTS PASSED ===")

@@ -24,6 +24,7 @@ from extreme.realtime_high_spike.guardrail import (
 )
 from extreme.realtime_high_spike.residual_lift import (
     PERIOD_DEFS,
+    CorrectionMode,
     ResidualLiftConfig,
     ResidualLiftCorrector,
     get_period,
@@ -34,13 +35,33 @@ from extreme.realtime_high_spike.residual_lift import (
 
 @dataclass
 class CorrectionProfile:
-    """A named tuning profile that drives both lift and guardrail configs."""
+    """A named tuning profile that drives both lift and guardrail configs.
+
+    Attributes:
+        name: Profile name (conservative / medium / aggressive).
+        mode: CorrectionMode — RELAXED loosens thresholds for offline diagnosis.
+        min_lift_floor: Minimum lift floor in RELAXED mode (price units).
+        spike_prob_threshold: Minimum spike probability to apply lift.
+        max_lift_ratio: Maximum lift as fraction of base_pred.
+        max_absolute_lift: Maximum absolute lift in price units.
+        protect_normal_hours: Extra guard in non-spike-prone periods.
+        period_9_16_boost: Multiplier on 9_16 lift candidate.
+    """
     name: str
+    mode: CorrectionMode = CorrectionMode.NORMAL
+    min_lift_floor: float = 0.0
     spike_prob_threshold: float = 0.6
     max_lift_ratio: float = 0.35
     max_absolute_lift: float = 350.0
     protect_normal_hours: bool = True
     period_9_16_boost: float = 1.15
+
+    def __post_init__(self) -> None:
+        if isinstance(self.mode, str):
+            self.mode = CorrectionMode(self.mode)
+        # In RELAXED mode, auto-set a sane min_lift_floor if not explicit
+        if self.mode.is_relaxed() and self.min_lift_floor == 0.0:
+            self.min_lift_floor = 30.0
 
     def to_lift_config(self) -> ResidualLiftConfig:
         return ResidualLiftConfig(
@@ -52,6 +73,8 @@ class CorrectionProfile:
             lift_quantile=0.90,
             period_aware=True,
             normal_hour_prob_cap=self.spike_prob_threshold * 1.1,
+            mode=self.mode,
+            min_lift_floor=self.min_lift_floor,
         )
 
     def to_guardrail_config(self) -> GuardrailConfig:
@@ -65,16 +88,35 @@ class CorrectionProfile:
             max_absolute_lift_1_8=self.max_absolute_lift * 0.6,
             max_lift_ratio_17_24=self.max_lift_ratio * 0.7,
             max_absolute_lift_17_24=self.max_absolute_lift * 0.6,
+            mode=self.mode,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "profile_used": self.name,
+            "correction_mode": self.mode.value,
             "spike_prob_threshold": self.spike_prob_threshold,
             "max_lift_ratio": self.max_lift_ratio,
             "max_absolute_lift": self.max_absolute_lift,
             "protect_normal_hours": self.protect_normal_hours,
             "period_9_16_boost": self.period_9_16_boost,
+            "min_lift_floor": self.min_lift_floor,
+        }
+
+    def to_dict_effective(self) -> dict[str, Any]:
+        """Return the *effective* parameters after mode adjustment.
+
+        This shows what thresholds are actually used at runtime.
+        """
+        lc = self.to_lift_config()
+        return {
+            "profile_used": self.name,
+            "correction_mode": self.mode.value,
+            "effective_spike_prob_threshold": (
+                lc.spike_prob_threshold * 0.6 if self.mode.is_relaxed()
+                else lc.spike_prob_threshold
+            ),
+            "lift_floor_applied": self.min_lift_floor if self.mode.is_relaxed() else 0.0,
         }
 
 
@@ -119,6 +161,7 @@ def get_profile(
     profile_name: str,
     config_path: Optional[str | Path] = None,
     overrides: Optional[dict[str, Any]] = None,
+    mode: Optional[CorrectionMode] = None,
 ) -> CorrectionProfile:
     """Resolve a CorrectionProfile by name from a config file, with optional overrides.
 
@@ -127,6 +170,7 @@ def get_profile(
                       or 'all' to indicate bulk run.
         config_path: Path to profile YAML/JSON config file.
         overrides: Optional explicit overrides (takes precedence over profile values).
+        mode: CorrectionMode override (RELAXED = offline-only looser thresholds).
 
     Returns:
         CorrectionProfile instance.
@@ -147,6 +191,10 @@ def get_profile(
     # Apply overrides (explicit CLI args take precedence)
     if overrides:
         params.update(overrides)
+
+    # Set mode if provided
+    if mode is not None:
+        params["mode"] = mode
 
     return CorrectionProfile(name=profile_name, **params)
 
@@ -293,6 +341,53 @@ def run_correction(
 
 # ── Correction manifest writer ────────────────────────────────────────
 
+def diagnose_zero_lift(
+    df: pd.DataFrame,
+    *,
+    top_n: int = 20,
+    threshold_col: str = "spike_prob_threshold",
+) -> None:
+    """Print diagnostic information about rows where lift_applied == 0.
+
+    Groups zero-lift rows by reason_code and shows representative samples
+    so the user can understand why correction did not fire.
+
+    Args:
+        df: Corrected DataFrame (must contain lift_applied, reason_code,
+            spike_prob, base_fused_pred, hour_business columns).
+        top_n: Number of sample rows to show per reason.
+        threshold_col: Column name for the spike-probability threshold value.
+    """
+    zero = df[df["lift_applied"] <= 0].copy()
+
+    if len(zero) == 0:
+        print("  [diagnose] No zero-lift rows found.")
+        return
+
+    print(f"\n  [diagnose] Total zero-lift rows: {len(zero)} / {len(df)}")
+
+    for reason in zero["reason_code"].unique():
+        subset = zero[zero["reason_code"] == reason]
+        print(f"\n  reason_code='{reason}': {len(subset)} rows")
+
+        if len(subset) > 0:
+            cols = [c for c in [
+                "business_day", "hour_business", "period",
+                "spike_prob", "base_fused_pred", "lift_applied",
+            ] if c in subset.columns]
+            if not cols:
+                cols = subset.columns[:5].tolist()
+            samples = subset.head(top_n)[cols]
+            for idx, row in samples.iterrows():
+                vals = " | ".join(f"{c}={row[c]}" for c in cols)
+                print(f"    row {idx}: {vals}")
+
+    # Show reason distribution
+    print(f"\n  [diagnose] Reason code distribution:")
+    for reason, count in zero["reason_code"].value_counts().items():
+        print(f"    {reason}: {count}")
+
+
 def write_correction_manifest(
     out_dir: str | Path,
     profile: CorrectionProfile,
@@ -315,12 +410,23 @@ def write_correction_manifest(
 
     manifest: dict[str, Any] = {
         "profile_used": profile.name,
+        "correction_mode": profile.mode.value,
         "spike_prob_threshold": profile.spike_prob_threshold,
         "max_lift_ratio": profile.max_lift_ratio,
         "max_absolute_lift": profile.max_absolute_lift,
         "protect_normal_hours": profile.protect_normal_hours,
         "period_9_16_boost": profile.period_9_16_boost,
     }
+    if profile.mode.is_relaxed():
+        effective = profile.to_dict_effective()
+        manifest["effective_spike_prob_threshold"] = effective.get(
+            "effective_spike_prob_threshold",
+        )
+        manifest["lift_floor_applied"] = effective.get("lift_floor_applied", 0.0)
+        manifest["note"] = (
+            "RELAXED mode is for offline diagnosis only. "
+            "Do NOT use in production_pipeline."
+        )
     if metrics:
         manifest["metrics"] = metrics
     if extra:

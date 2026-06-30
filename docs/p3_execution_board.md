@@ -1,7 +1,7 @@
 # P3 Rolling Fusion + SOTA Lab — Execution Board
 
 > **Purpose**: Track all tasks across the P3 execution pipeline.
-> **Status**: `[P3a COMPLETE — P3b PENDING RUN — P3c SCOPED — P3d PENDING RUN]`
+> **Status**: `[P3a COMPLETE — P3b RUN COMPLETE (NO-GO) — P3c SCOPED — P3d EVALUATED (NO-GO)]`
 > **Branch**: `agent/p3-rolling-fusion-sota`
 
 ---
@@ -23,11 +23,11 @@
 |-----------|--------|-------|
 | P3a: Risk leakage fixes | Done | FIX-01–FIX-04 applied, schema.py created, all tests pass |
 | P3b: Rolling 30D fusion script | Done | `run_rolling_30d_fusion.py` — 4 weight modes, CLI aliases, leakage-safe |
-| P3b: Rolling 30D actual run | PENDING | Needs prediction pack input — blocked on pack availability |
+| P3b: Rolling 30D actual run | DONE | Softmax: sMAPE 19.86 (GO), severe 82 (NO-GO). All 3 modes: NO-GO |
 | P3c: SOTA lab scaffolding | Done | `docs/P3_single_model_sota_lab.md` — experiment plan + feasibility matrix |
-| P3c: SOTA actual experiments | PENDING | LightGBM tuning deferred — scope is coordination only |
+| P3c: SOTA actual experiments | DEFERRED | LightGBM tuning deferred — rolling fusion did not meet GO thresholds |
 | P3d: Unified evaluation script | Done | `evaluate_p3_rolling_sota_summary.py` — GO/CONDITIONAL/NO-GO |
-| P3d: Actual evaluation run | PENDING | Needs rolling fusion output as input |
+| P3d: Actual evaluation run | DONE | VERDICT: NO-GO — severe underestimate threshold not met |
 
 ---
 
@@ -66,7 +66,15 @@
 | Default lookback | 30 days |
 | Min history | 10 days |
 | CLI aliases | `--weight-mode` / `--fusion-mode`, `--lookback-days` / `--train-window-days` |
-| Status | Script complete — actual run pending prediction pack |
+| Status | Script complete — ACTUAL RUN COMPLETE — see `docs/reports/P3_rolling_30d_fusion_report.md` |
+
+### P3b Rolling Fusion Results
+
+| Mode | sMAPE | Severe | Verdict |
+|------|-------|--------|---------|
+| anchor_90 | 20.61 | 82 | sMAPE ✅ (≤20.86), Severe ❌ (>63) |
+| softmax | **19.86** | 83 | sMAPE ✅, Severe ❌ |
+| convex | 23.70 | 152 | Both ❌ |
 
 ## P3c — Single-Model SOTA Lab
 
@@ -82,6 +90,17 @@
 | Script | Status |
 |--------|--------|
 | `scripts/evaluate_p3_rolling_sota_summary.py` | Done — GO/CONDITIONAL/NO-GO rules |
+| **Actual evaluation** | **DONE — verdict: NO-GO** |
+
+### P3d Evaluation Verdict
+
+| Criterion | Threshold | Best P3 (softmax) | Met? |
+|-----------|-----------|-------------------|------|
+| sMAPE ≤ 20.86 | 20.86 | 19.86 | ✅ |
+| Severe underestimates ≤ 63 | 63 | 83 | ❌ |
+| **Verdict** | | | **NO-GO** |
+
+Phase 2 best (static anchor_90 + medium correction) remains the best known candidate.
 
 ---
 
@@ -89,13 +108,14 @@
 
 | ID | Blocker | Status |
 |----|---------|--------|
-| B20 | Prediction pack for rolling fusion | PENDING — needs Phase 2 pack or fresh build |
+| B20 | Rolling fusion severe exceedance | OPEN — all modes produce severe >63; optimizer needs severe penalty |
 | B21 | SOTA model experiments | DEFERRED — LightGBM tuning scoped but not started |
 
 ## Next Actions
 
-1. Run P3b rolling fusion with Phase 2 prediction pack
-2. Run P3d unified evaluation
-3. If rolling fusion meets GO → confirm P3 GO
-4. If not → diagnose and iterate on weight mode/lookback
-5. Run SOTA LightGBM experiments (deferred to next cycle)
+1. ✅ Run P3b rolling fusion with Phase 2 prediction pack
+2. ✅ Run P3d unified evaluation
+3. ❌ Rolling fusion NO-GO — severe underestimates exceed threshold
+4. **Diagnose**: Add severe underestimate penalty to weight optimizer
+5. **Alternative**: Increase anchor weight to 0.95 or deploy Phase 2 as-is
+6. SOTA LightGBM experiments (deferred to next cycle)

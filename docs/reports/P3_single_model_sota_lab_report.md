@@ -219,3 +219,94 @@ not applied as a post-hoc correction.
 | `scripts/evaluate_lightgbm_p3_walkforward.py` | **New** — Walk-forward SOTA evaluation |
 | `docs/reports/P3_single_model_sota_lab_report.md` | **Updated** — This report with walk-forward section |
 | `reports/local/p3_sota_lab/` | **New** — 11 experiment result JSONs + predictions |
+
+---
+
+## SOTA Lab Decision
+
+### 1. Fixed-Window Spike Weighting: Direction Valid ✅
+
+Spike-weighted training is validated as the most effective single-model enhancement:
+
+| Profile | Raw sMAPE | Cal sMAPE | Δ vs baseline |
+|---------|-----------|-----------|---------------|
+| baseline | 26.67 | 26.61 | — |
+| spike_weighted | 26.53 | 25.23 | **−1.38** |
+| all (no-leakage) | 26.75 | 25.14 | **−1.47** |
+
+The −1.4 sMAPE gain is consistent across profiles and robust to leakage-safe feature removal. The 9_16 period benefits most (sMAPE 37.24 → 35.14), confirming the sample-weight design targets the right failure mode.
+
+### 2. Why Post-Hoc Walk-Forward Calibration Failed ❌
+
+Post-hoc correction on existing daily-retrained predictions only achieved **−0.17 sMAPE** (26.40 → 26.23), while the same profile shows −1.4 in fixed-window. **Root cause:**
+
+```
+Fixed-window:   Train[once] → Predict[all days]
+                ↑ model has no knowledge of future temporal shifts
+                ↑ calibration adds meaningful new information (recent bias)
+                → −1.4 sMAPE gain
+
+Daily walk-forward: Train[D-365:D-1] → Predict[D]
+                    ↑ model ALREADY adapts to recent regime each day
+                    ↑ calibration has NO new information to add (bias ≈ 0)
+                    → −0.17 sMAPE gain (just noise)
+```
+
+The daily retrain loop in `run_precision_simulation()` already incorporates the D-1 cutoff, so a 30-day rolling calibration window [D-30, D-1] is nearly a subset of the training window [D-365, D-1]. The bias is already captured by the model.
+
+**Code flow mismatch:**
+
+| Component | Fixed-window | Walk-forward (post-hoc) |
+|-----------|-------------|------------------------|
+| Training | `train_lightgbm_p3_sota.py` — spike weights IN the loss | `_fit_realtime_fixed_window()` — NO spike weights |
+| Calibration | Same training window | [D-30, D-1] is subset of [D-365, D-1] |
+| Spike correction | Learned in model | Post-hoc quantile shift (same sign for all rows) |
+
+**Conclusion**: To realize P3 gains, spike weighting must be in the **training loss** of each daily retrain, not as a post-hoc correction.
+
+### 3. Next Valid Experiment: Integrate Spike Weighting into `fold_train_predict`
+
+The modification point is `lightGBM/main_fix.py:_fit_realtime_fixed_window()` (lines 53-179). The three segment-level `lgb.LGBMRegressor` fits need custom sample weights:
+
+```python
+# In _fit_realtime_fixed_window(), before each segment fit:
+
+def _compute_spike_weights(y: np.ndarray, hour: np.ndarray) -> np.ndarray:
+    """Sample weights for spike-aware training."""
+    w = np.ones(len(y))
+    # Valley (1-8h): light touch
+    # Solar (9-16h): heavy weight on low-price + spike
+    w[(hour >= 9) & (hour <= 16) & (y < 50)] = 2.0      # low price under-prediction
+    w[(hour >= 9) & (hour <= 16) & (y < 0)] = 5.0        # negative price
+    w[(hour >= 9) & (hour <= 16) & (y > y.quantile(0.95))] = 3.0  # top 5% spike
+    # Peak (17-24h): wind-conditioned spike weight
+    w[(hour >= 17) & (hour <= 24) & (y > y.quantile(0.95))] = 3.0
+    return w
+```
+
+Then pass `sample_weight=w_segment` to each `lgb.LGBMRegressor.fit()` call. The existing `_fit_realtime_fixed_window` already passes sample weights for solar (lines 107, 119) and peak (lines 148, 151), so the infrastructure exists — only the weight values need changing.
+
+**No adapter changes needed**: `fold_train_predict` calls `_run_rt_daily_walk_forward` → `run_lgbm_pipeline` → `run_precision_simulation` → `_fit_realtime_fixed_window`. Modifying the inner fit function propagates to all callers automatically.
+
+**Expected outcome**: sMAPE 26.40 → ~25.0 (walk-forward), severe_underestimate 7 → ~3-5. This would approach but likely not beat Phase2 fusion (20.86), confirming the paper narrative: *single-model improvement is bounded; fusion is needed for SOTA.*
+
+### 4. Deep Models Deferred ⏸️
+
+| Model | Checkpoint | Cost to Run | Decision |
+|-------|-----------|-------------|----------|
+| RT916 | ✅ 80 .pth segment files | Medium (GPU-minutes) | **Deferred** — pursue only if LightGBM cannot reach sMAPE < 22 |
+| TimeMixer | ⚠️ Dayahead only | High (GPU-hours) | **Deferred** — dayahead-only; no realtime path without retraining |
+| TimesFM | ❌ No training possible | Very Low | **Deferred** — inference-only, no improvement path |
+| SGDFNet | ❌ No checkpoints | High (30+ min) | **Deferred** — cost too high for uncertain gain |
+
+**Rationale**: The P0 window shows that LightGBM with spike weighting (estimated walk-forward sMAPE ~25) is still ~4 sMAPE points above the Phase2 fusion target (20.86). Deep models could bridge this gap but require GPU resources and checkpoint availability that aren't confirmed. They should be pursued only if single-model LightGBM hits diminishing returns.
+
+### 5. Current Production Candidate Remains Phase2 Anchored Fusion
+
+The best verified production candidate remains the **Phase2 anchored fusion** (sMAPE 20.86, severe 63) from `lightgbm_anchor_90 + normal/medium correction`. P3 single-model enhancements do not yet beat this candidate.
+
+**Decision**: The P3 SOTA Lab does **not** produce a new production candidate. Its output is:
+1. ✅ Validated spike-weighting direction (−1.4 sMAPE in fixed-window)
+2. ✅ Actionable integration path into daily walk-forward (modify `_fit_realtime_fixed_window` weights)
+3. ✅ Clear paper narrative: *single-model spike weighting → bounded improvement → fusion necessary for SOTA*
+4. ⏸️ Deep models deferred — no GPU-time investment until LightGBM hits sMAPE < 22

@@ -13,7 +13,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from extreme.realtime_high_spike.residual_lift import PERIOD_DEFS, get_period
+from extreme.realtime_high_spike.residual_lift import (
+    PERIOD_DEFS,
+    CorrectionMode,
+    apply_correction_mode_threshold,
+    get_period,
+)
 
 # ── Shared reason codes ──────────────────────────────────────────────
 # These constants match those in ResidualLiftCorrector for consistency.
@@ -73,6 +78,13 @@ class GuardrailConfig:
     # Negative base guard
     negative_base_guard: bool = True
 
+    # Correction mode (relaxed = offline-only looser thresholds)
+    mode: CorrectionMode = CorrectionMode.NORMAL
+
+    def __post_init__(self) -> None:
+        if isinstance(self.mode, str):
+            self.mode = CorrectionMode(self.mode)
+
 
 # ── Guardrail result ─────────────────────────────────────────────────
 
@@ -110,6 +122,20 @@ class SpikeGuardrail:
     def __init__(self, config: Optional[GuardrailConfig] = None):
         self.config = config or GuardrailConfig()
 
+    # ── Effective thresholds (mode-aware) ─────────────────────────
+
+    def _effective_min_prob(self) -> float:
+        """Return min_prob_for_lift adjusted for correction mode."""
+        return apply_correction_mode_threshold(
+            self.config.min_prob_for_lift, self.config.mode,
+        )
+
+    def _effective_normal_cap(self) -> float:
+        """In RELAXED mode, disable normal-hour protection entirely."""
+        if self.config.mode.is_relaxed():
+            return 0.0  # spike_prob < 0 is never true → protection never fires
+        return self.config.normal_hour_prob_cap
+
     # ── Main evaluate ──────────────────────────────────────────────
 
     def evaluate(
@@ -131,8 +157,9 @@ class SpikeGuardrail:
                 reason_code=NO_CORRECTION_NEGATIVE_BASE,
             )
 
-        # 2. Low probability check
-        if spike_prob < self.config.min_prob_for_lift:
+        # 2. Low probability check (mode-aware)
+        eff_min_prob = self._effective_min_prob()
+        if spike_prob < eff_min_prob:
             return GuardrailResult(
                 final_pred=base_pred,
                 reason_code=NO_CORRECTION_LOW_PROB,
@@ -140,11 +167,12 @@ class SpikeGuardrail:
 
         period = get_period(hour_business)
 
-        # 3. Normal hour protection
+        # 3. Normal hour protection (mode-aware: relaxed essentially disables it)
+        eff_normal_cap = self._effective_normal_cap()
         if (
             self.config.protect_normal_hours
             and period != "9_16"
-            and spike_prob < self.config.normal_hour_prob_cap
+            and spike_prob < eff_normal_cap
         ):
             return GuardrailResult(
                 final_pred=base_pred,
@@ -164,12 +192,17 @@ class SpikeGuardrail:
             ratio_cap = self.config.max_lift_ratio_17_24
             abs_cap = self.config.max_absolute_lift_17_24
 
+        # In RELAXED mode, double the ratio and abs caps for 1_8 and 17_24
+        if self.config.mode.is_relaxed() and period != "9_16":
+            ratio_cap *= 2.0
+            abs_cap = max(abs_cap, 500.0)
+
         lift_amount = corrected_pred - base_pred
         max_lift_by_ratio = base_pred * ratio_cap
         allowed_lift = min(lift_amount, max_lift_by_ratio, abs_cap)
         allowed_lift = max(0.0, allowed_lift)
 
-        if lift_amount > allowed_lift:
+        if lift_amount > allowed_lift and allowed_lift >= 0:
             final_pred = base_pred + allowed_lift
             return GuardrailResult(
                 final_pred=final_pred,

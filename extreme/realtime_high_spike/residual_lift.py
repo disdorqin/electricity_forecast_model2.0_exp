@@ -11,12 +11,47 @@ Provides:
 
 from __future__ import annotations
 
+import enum
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
+
+# ── Correction Mode ──────────────────────────────────────────────────
+
+class CorrectionMode(str, enum.Enum):
+    """Correction mode flag — controls threshold strictness.
+
+    Attributes:
+        NORMAL:  Default production-safe mode (strict thresholds, normal-hour protection).
+        RELAXED: Offline-only diagnostic mode that ensures lift fires on high-prob hours.
+                 DO NOT use in production_pipeline.
+    """
+    NORMAL = "normal"
+    RELAXED = "relaxed"
+
+    def is_relaxed(self) -> bool:
+        return self == self.RELAXED
+
+
+def apply_correction_mode_threshold(
+    base_threshold: float,
+    mode: CorrectionMode,
+    *,
+    relaxed_multiplier: float = 0.6,
+) -> float:
+    """Adjust a threshold based on correction mode.
+
+    In RELAXED mode the threshold is multiplied by *relaxed_multiplier*,
+    making it easier for correction to fire.  In NORMAL mode the threshold
+    is returned unchanged.
+    """
+    if mode.is_relaxed():
+        return base_threshold * relaxed_multiplier
+    return base_threshold
+
 
 # ── Period definitions ────────────────────────────────────────────────
 
@@ -62,6 +97,10 @@ class ResidualLiftConfig:
         max_lift_ratio: Maximum lift as fraction of base_pred (0-1).
         max_absolute_lift: Maximum absolute lift in price units.
         period_9_16_boost: Multiplier on the 9_16 lift candidate.
+        mode: CorrectionMode — RELAXED loosens thresholds to ensure lift fires on
+              high-prob hours (offline-only, do NOT use in production).
+        min_lift_floor: Minimum lift amount in price units when mode=RELAXED
+                        (ensures lift > 0 even if fitted candidate is very small).
     """
     spike_prob_threshold: float = 0.5
     lift_quantile: float = 0.90
@@ -71,6 +110,12 @@ class ResidualLiftConfig:
     max_lift_ratio: float = 0.5
     max_absolute_lift: float = 500.0
     period_9_16_boost: float = 1.0
+    mode: CorrectionMode = CorrectionMode.NORMAL
+    min_lift_floor: float = 0.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.mode, str):
+            self.mode = CorrectionMode(self.mode)
 
 
 # ── Lift result ───────────────────────────────────────────────────────
@@ -164,10 +209,16 @@ class ResidualLiftCorrector:
 
     def set_lift_candidates(self, candidates: dict[str, float]) -> "ResidualLiftCorrector":
         """Manually set lift candidates (bypass fitting)."""
-        self._lift_candidates = dict(candidates)
+        lift = dict(candidates)
+        # Apply min_lift_floor in RELAXED mode
+        if self.config.mode.is_relaxed() and self.config.min_lift_floor > 0:
+            for p in lift:
+                if lift[p] < self.config.min_lift_floor:
+                    lift[p] = self.config.min_lift_floor
+        self._lift_candidates = dict(lift)
         # Apply 9_16 boost when setting manually too
         self._lift_candidates["9_16"] = (
-            candidates.get("9_16", 0.0) * self.config.period_9_16_boost
+            lift.get("9_16", 0.0) * self.config.period_9_16_boost
         )
         self._fitted = True
         return self
@@ -181,6 +232,41 @@ class ResidualLiftCorrector:
     def get_lift_candidate(self, period: str) -> float:
         """Return the lift candidate for a given period."""
         return self._lift_candidates.get(period, 0.0)
+
+    # ── Compute lift ───────────────────────────────────────────────
+
+    # ── Effective thresholds (mode-aware) ─────────────────────────
+
+    def _effective_spike_threshold(self) -> float:
+        """Return the spike-probability threshold adjusted for correction mode."""
+        return apply_correction_mode_threshold(
+            self.config.spike_prob_threshold, self.config.mode,
+        )
+
+    def _effective_normal_hour_cap(self) -> float:
+        """Return the normal-hour protection cap adjusted for correction mode.
+
+        In RELAXED mode this is set to 0.0 so normal-hour protection
+        (spike_prob < cap) is always False, effectively disabling it.
+        """
+        if self.config.mode.is_relaxed():
+            return 0.0  # disables normal-hour protection (spike_prob < 0 is never true)
+        return self.config.normal_hour_prob_cap
+
+    def _effective_ratio_cap(self) -> float:
+        """Return the max lift ratio cap adjusted for correction mode.
+
+        RELAXED mode doubles the ratio to make sure lift can fire.
+        """
+        if self.config.mode.is_relaxed():
+            return max(self.config.max_lift_ratio, 0.5)
+        return self.config.max_lift_ratio
+
+    def _effective_abs_cap(self) -> float:
+        """Return the max absolute lift cap adjusted for correction mode."""
+        if self.config.mode.is_relaxed():
+            return max(self.config.max_absolute_lift, 500.0)
+        return self.config.max_absolute_lift
 
     # ── Compute lift ───────────────────────────────────────────────
 
@@ -201,9 +287,10 @@ class ResidualLiftCorrector:
             LiftResult with corrected_pred, lift_applied, reason_code.
         """
         period = get_period(hour_business)
+        eff_threshold = self._effective_spike_threshold()
 
         # 1. Low probability → no correction
-        if spike_prob < self.config.spike_prob_threshold:
+        if spike_prob < eff_threshold:
             return LiftResult(
                 corrected_pred=base_pred,
                 lift_applied=0.0,
@@ -211,10 +298,11 @@ class ResidualLiftCorrector:
             )
 
         # 2. Normal hour protection (if enabled and period is not 9_16)
+        eff_normal_cap = self._effective_normal_hour_cap()
         if (
             self.config.protect_normal_hours
             and period != "9_16"
-            and spike_prob < self.config.normal_hour_prob_cap
+            and spike_prob < eff_normal_cap
         ):
             return LiftResult(
                 corrected_pred=base_pred,
@@ -225,10 +313,17 @@ class ResidualLiftCorrector:
         # 3. Compute target lift from candidate
         raw_lift = self._lift_candidates.get(period, 0.0)
 
+        # 3b. In RELAXED mode, enforce a minimum lift floor so correction
+        #     always fires on high-prob hours even if the fitted candidate
+        #     is near zero.
+        if self.config.mode.is_relaxed() and self.config.min_lift_floor > 0:
+            raw_lift = max(raw_lift, self.config.min_lift_floor)
+
         # 4. Cap lift by ratio and absolute limits
-        ratio_cap = base_pred * self.config.max_lift_ratio
-        abs_cap = self.config.max_absolute_lift
-        capped_lift = min(raw_lift, ratio_cap, abs_cap)
+        eff_ratio_cap = self._effective_ratio_cap()
+        eff_abs_cap = self._effective_abs_cap()
+        ratio_cap = base_pred * eff_ratio_cap
+        capped_lift = min(raw_lift, ratio_cap, eff_abs_cap)
         capped_lift = max(0.0, capped_lift)
 
         if capped_lift <= 0.0:

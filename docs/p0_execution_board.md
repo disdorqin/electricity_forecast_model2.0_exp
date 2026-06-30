@@ -1,7 +1,6 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Purpose**: Track all tasks across the P0 full execution pipeline.
 > **Status**: `[Phase 1B — COMPLETE: Full pipeline end-to-end via LightGBM bootstrap]`
 > **Runner branch**: `agent/p0-full-execution-runner-clean`
 

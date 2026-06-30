@@ -392,7 +392,7 @@ def main() -> None:
                  f"Choose 'normal' or 'relaxed'.")
 
     if correction_mode.is_relaxed():
-        print("\n  ⚠  RELAXED mode enabled — offline-only, do NOT use in production.\n")
+        print("\n  [RELAXED MODE] offline-only, do NOT use in production.\n")
 
     if not pp_path.exists():
         sys.exit(f"Error: prediction pack not found: {pp_path}")

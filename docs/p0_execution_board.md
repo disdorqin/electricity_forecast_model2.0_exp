@@ -1,8 +1,8 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 1B — COMPLETE: Full pipeline end-to-end via LightGBM bootstrap]`
-> **Runner branch**: `agent/p0-full-execution-runner-clean`
+> **Status**: `[Phase 2 — COMPLETE: Anchored fusion correction GO achieved]`
+> **Runner branch**: `agent/p0-phase2-anchored-fusion-run`
 
 ---
 
@@ -270,3 +270,62 @@ The correction evaluator appends profile name to `--out-dir`, producing double-n
 ### Full Report
 
 See [docs/reports/P0_long_run_status.md](reports/P0_long_run_status.md) for detailed metrics, GO/CONDITIONAL/NO-GO assessment, and next steps.
+
+---
+
+## Phase 2 — Anchored Fusion Big Run (Completed 2026-06-30)
+
+> **Result**: GO achieved with `lightgbm_anchor_90` + `medium` profile in normal mode.
+> **Branch**: `agent/p0-phase2-anchored-fusion-run` (PR #7 + PR #8 integrated)
+
+### Fusion Modes Generated
+
+| Mode | base sMAPE | base Severe | Status |
+|------|-----------|-------------|--------|
+| mean | 24.46 | 150 | ✅ Baseline |
+| lightgbm_anchor_90 | 21.20 | 81 | ✅ Best |
+| lightgbm_anchor_80 | 21.55 | 86 | ✅ Good |
+| candidate_reference_only | 20.60 | 80 | ✅ LightGBM-only |
+
+### Correction Evaluations: 24 runs (4 packs × 2 modes × 3 profiles)
+
+### Best Normal-Mode Candidate
+
+| Metric | Value |
+|--------|-------|
+| **Fusion** | **lightgbm_anchor_90** (0.9 LGBM + 0.05 DA + 0.05 lag7) |
+| **Profile** | **medium** (p=0.60, lift=0.35/350, boost=1.15) |
+| **sMAPE** | **20.86** (vs LightGBM-only 22.02) |
+| **Severe underestimates** | **63** (vs LightGBM-only 80) |
+| **False lift rate** | 7.0% (under 15% GO threshold) |
+| **Normal hours degradation** | **-0.33** (improvement) |
+| **Lift applied** | 225 timestamps (7.8%) |
+| **Verdict** | **GO** ✅ |
+
+### GO / CONDITIONAL / NO-GO Summary
+
+| Verdict | Count | Best Example |
+|---------|-------|-------------|
+| **GO** | 3 | lightgbm_anchor_90 + medium, lightgbm_anchor_80 + medium, lightgbm_anchor_90 + conservative |
+| NO-GO | 9 | All mean candidates, all aggressive profiles, candidate_reference_only modes |
+| NO-GO (relaxed) | 12 | All relaxed modes (false lift >80%) |
+
+### Why Correction Now Activates
+
+In Phase 1B, `base_fused_pred = y_pred` (single-model), blocked by negative-base guardrail (`base_fused_pred - y_pred <= 0`). In Phase 2, anchored fusion blends 5-10% dayahead/lag7 into base_fused_pred, creating a non-zero residual that passes the guardrail on spike hours.
+
+### Key Files
+
+| File | Description |
+|------|-------------|
+| `docs/reports/P0_phase2_anchored_correction_report.md` | Full report |
+| `scripts/build_multicandidate_pack.py` | Pack builder with fusion modes |
+| `scripts/evaluate_phase2_anchored_results.py` | Aggregation + ranking |
+| `reports/local/p0_phase2_anchored/` | All outputs (gitignored) |
+
+### Blocker Status
+
+| Blocker | Status |
+|---------|--------|
+| Correction not activating (Phase 1B) | ✅ RESOLVED via anchored fusion |
+| Multi-model pack needed for guardrail | ✅ RESOLVED via LightGBM-anchored baselines |

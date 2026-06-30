@@ -374,19 +374,22 @@ def apply_quantile_guard(
 ) -> pd.DataFrame:
     """Post-process predictions with upward quantile guard.
 
-    For high-risk hours (spike risk high AND recent severe rate high),
-    override base_fused_pred:
-        final_pred = max(base_fused_pred, lightgbm_pred, recent_p75_prediction)
+    For high-risk, high-severe-rate, 9_16 hours only:
+        final_pred = max(base_fused_pred, lightgbm_pred * 1.05, base_fused_pred * 1.08)
+
+    Only targets the 9_16 period where severe underestimates are most costly.
+    Uses a gentler lift capped at 8% above base to avoid false lifts.
     """
     preds = predictions.copy()
     preds["guarded"] = 0
     preds["guard_source"] = "none"
 
-    # Pivot pack predictions
+    # Pivot pack predictions (long -> wide for model columns)
     pred_pivot = pack.pivot_table(
         index=["business_day", "hour_business"],
         columns="model_name", values="y_pred", aggfunc="first",
     )
+    ytrue_series = pack.groupby(["business_day", "hour_business"])["y_true"].first()
 
     # Merge risk scores if available
     has_risk = risk_df is not None and not risk_df.empty
@@ -394,9 +397,8 @@ def apply_quantile_guard(
         risk_df = risk_df.copy()
         risk_df["business_day"] = risk_df["business_day"].astype(str)
 
-    # Compute recent p75 and severe rate for each business_day
+    # Compute recent severe rate for each business_day
     business_days = sorted(pack["business_day"].unique())
-    bd_to_p75: dict[str, float] = {}
     bd_to_severe_rate: dict[str, float] = {}
     for day in business_days:
         day_dt = pd.to_datetime(day)
@@ -407,21 +409,29 @@ def apply_quantile_guard(
             & (pack["business_day"] <= lookback_end.strftime("%Y-%m-%d"))
         )
         recent = pack[mask]
-        if not recent.empty and anchor_model in recent.columns and "y_true" in recent.columns:
-            anchor_vals = recent[anchor_model].dropna().values
-            bd_to_p75[day] = float(np.percentile(anchor_vals, 75)) if len(anchor_vals) > 0 else 0.0
-            yt = recent["y_true"].values
-            yp = recent[anchor_model].values
-            bd_to_severe_rate[day] = compute_severe_rate(yt, yp)
+        if not recent.empty and anchor_model in pred_pivot.columns:
+            recent_bds = recent["business_day"].unique()
+            recent_pivot = pred_pivot[pred_pivot.index.get_level_values("business_day").isin(recent_bds)]
+            common_idx = recent_pivot.index.intersection(ytrue_series.index)
+            if len(common_idx) > 0:
+                yt = ytrue_series.reindex(common_idx).values
+                yp = recent_pivot.loc[common_idx, anchor_model].values if anchor_model in recent_pivot.columns else yt
+                bd_to_severe_rate[day] = compute_severe_rate(yt, yp)
+            else:
+                bd_to_severe_rate[day] = 0.0
         else:
-            bd_to_p75[day] = 0.0
             bd_to_severe_rate[day] = 0.0
 
-    # Apply guard
+    # Apply guard — only on 9_16 hours with high risk AND high severe rate
     n_guarded = 0
     for idx, row in preds.iterrows():
         bd = row["business_day"]
         hb = row["hour_business"]
+
+        # Only guard 9_16 period (peak hours)
+        period = row.get("period", get_period(int(hb)))
+        if period != "9_16":
+            continue
 
         # Check risk
         risk_high = False
@@ -443,17 +453,18 @@ def apply_quantile_guard(
             except (KeyError, TypeError):
                 anchor_pred = 0.0
 
-            p75_val = bd_to_p75.get(bd, 0.0)
             base_val = float(row["base_fused_pred"])
-            guarded_val = max(base_val, anchor_pred, p75_val)
+            # Gentler lift: max(base, anchor*1.05, base*1.08)
+            gentle_lift = max(base_val * 1.08, anchor_pred * 1.05)
+            guarded_val = max(base_val, gentle_lift)
 
             if guarded_val > base_val + 1e-6:
-                preds.at[idx, "base_fused_pred"] = round(guarded_val, 4)
+                preds.at[idx, "base_fused_pred"] = round(min(guarded_val, base_val * 1.15), 4)  # cap at 15%
                 preds.at[idx, "guarded"] = 1
                 preds.at[idx, "guard_source"] = "quantile_guard"
                 n_guarded += 1
 
-    print(f"  Quantile guard applied: {n_guarded} timestamp(s) lifted")
+    print(f"  Quantile guard applied: {n_guarded} timestamp(s) lifted (9_16 only, gentle)")
     return preds
 
 
@@ -546,8 +557,9 @@ def compute_per_day_weights(
             w = fit_severe_anchor_weights(train_pivot, train_ytrue_aligned, available_models,
                                           anchor_model=anchor_model, min_anchor_weight=severe_anchor_min)
         elif fusion_mode == "quantile_guarded":
-            # quantile_guarded uses softmax base weights
-            w = fit_softmax_weights(train_pivot, train_ytrue_aligned, available_models, temperature=temperature)
+            # quantile_guarded uses severe_softmax base weights for better severe control
+            w = fit_severe_softmax_weights(train_pivot, train_ytrue_aligned, available_models,
+                                           temperature=temperature, alpha=severe_alpha, beta=severe_beta)
         else:
             w = {m: 1.0 / len(available_models) for m in available_models}
 

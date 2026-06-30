@@ -106,6 +106,50 @@ Phase 2 best (static anchor_90 + medium correction) remains the best known candi
 
 ---
 
+## P3.1 — Severe-Underestimate-Aware Rolling (Completed 2026-06-30)
+
+> **Result**: NO-GO — Weight-based severe awareness is directionally correct but insufficient alone.
+> **Branch**: `agent/p31-severe-aware-rolling`
+> **Report**: `docs/reports/P31_severe_aware_rolling_report.md`
+
+### P3.1 New Weight Modes
+
+| Mode | Mechanism |
+|------|-----------|
+| `severe_softmax` | `score = sMAPE + alpha*severe_rate + beta*underprediction_MAE/200` |
+| `severe_anchor` | LightGBM ≥ 0.85; baselines only if they don't worsen severe rate |
+| `quantile_guarded` | severe_softmax base + upward guard on high-risk 9_16 hours |
+
+### P3.1 Results
+
+| Mode | Config | sMAPE | Severe | Δ sMAPE vs Phase2 | Δ Severe vs Phase2 |
+|------|--------|-------|--------|-------------------|--------------------|
+| Phase2 best (anchor_90+correction) | — | 20.86 | 63 | baseline | baseline |
+| P3 softmax | T=0.1 | 19.86 | 83 | -1.00 ✅ | +20 ❌ |
+| **severe_softmax** | alpha=3.0, beta=1.0 | **19.10** | 80 | **-1.76** ✅ | +17 ❌ |
+| severe_anchor | min=0.85 | 20.45 | 84 | -0.41 ✅ | +21 ❌ |
+| quantile_guarded | risk=0.4, rate=0.04 | 21.14 | **62** | +0.28 ❌ | **-1** ✅ |
+| quantile_guarded | risk=0.5, gentle | 19.09 | 79 | -1.77 ✅ | +16 ❌ |
+
+### P3.1 Verdict
+
+| Criterion | Threshold | Best Mode | Met? |
+|-----------|-----------|-----------|------|
+| sMAPE ≤ 20.86 | 20.86 | 19.10 (severe_softmax) | ✅ |
+| Severe ≤ 63 | 63 | 62 (quantile_guarded) | ✅ |
+| Both simultaneously | — | — | **❌ No mode achieves both** |
+
+**Verdict: NO-GO** — Weight-based severe awareness is directionally correct but cannot replace correction. Recommend combining rolling severe_softmax (best sMAPE 19.10) with Phase2 correction pipeline.
+
+### P3.1 Files Changed
+
+| File | Change |
+|------|--------|
+| `scripts/run_rolling_30d_fusion.py` | +3 severe-aware modes, CLI args, quantile guard post-processing |
+| `tests/test_severe_aware_rolling.py` | NEW — 10 tests (severe penalty, anchor constraint, guard behavior) |
+| `docs/p3_execution_board.md` | Updated with P3.1 |
+| `docs/reports/P31_severe_aware_rolling_report.md` | NEW — full report |
+
 ## Blockers
 
 | ID | Blocker | Status |

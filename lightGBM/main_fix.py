@@ -22,6 +22,67 @@ VALLEY_HOURS = [1, 2, 3, 4, 5, 6, 7, 8]
 SOLAR_HOURS = [9, 10, 11, 12, 13, 14, 15, 16]
 PEAK_HOURS = [17, 18, 19, 20, 21, 22, 23, 24]
 
+SAMPLE_WEIGHT_PROFILES = ("none", "spike_weighted", "severe_underestimate_weighted", "period_spike_weighted")
+
+
+def _compute_spike_weights(
+    train_df: pd.DataFrame,
+    profile: str,
+    y_col: str = "y_clipped",
+    hour_col: str = "hour",
+) -> np.ndarray:
+    """Compute sample weights based on spike/severe profile using only historical y_true.
+
+    Leakage-safe: only uses training window y_true to define weights.
+    No prediction-day data is used.
+
+    Profiles:
+        - none: all 1.0
+        - spike_weighted: high_spike rows 3.0, 9_16 high_spike rows 6.0
+        - severe_underestimate_weighted: historical severe rows 4.0
+        - period_spike_weighted: 9_16 high_spike rows 8.0, other high_spike rows 3.0
+
+    Returns:
+        numpy array of sample weights, same length as train_df.
+    """
+    weights = np.ones(len(train_df), dtype=np.float64)
+
+    if profile == "none":
+        return weights
+
+    y = train_df[y_col].values
+    hour = train_df[hour_col].values
+
+    # Quantile thresholds computed from training window only (no leakage)
+    p90 = float(np.percentile(y, 90))
+    p95 = float(np.percentile(y, 95))
+
+    # High spike: top 10% of prices, minimum 150 to avoid noise
+    spike_threshold = max(p90, 150.0)
+    # Severe: top 5% of prices, minimum 250
+    severe_threshold = max(p95, 250.0)
+
+    is_high_spike = y > spike_threshold
+    is_severe = y > severe_threshold
+    is_9_16 = (hour >= 9) & (hour <= 16)
+
+    if profile == "spike_weighted":
+        weights[is_high_spike & is_9_16] = 6.0
+        weights[is_high_spike & ~is_9_16] = 3.0
+
+    elif profile == "severe_underestimate_weighted":
+        weights[is_severe] = 4.0
+
+    elif profile == "period_spike_weighted":
+        weights[is_high_spike & is_9_16] = 8.0
+        weights[is_high_spike & ~is_9_16] = 3.0
+
+    else:
+        raise ValueError(f"Unknown sample_weight_profile: {profile}. "
+                         f"Choose from {SAMPLE_WEIGHT_PROFILES}")
+
+    return weights
+
 
 def _split_history_train_val(history_df, val_ratio=0.2, min_val_rows=24 * 7):
     history_df = history_df.sort_values("ds").copy()
@@ -58,6 +119,7 @@ def _fit_realtime_fixed_window(
     target,
     raw_df=None,
     val_ratio=0.2,
+    sample_weight_profile: str | None = None,
 ):
     raw_df = raw_df.copy() if raw_df is not None else predictor.load_and_process_data(data_path, target)
     full_df = predictor.feature_engineering(raw_df)
@@ -78,8 +140,14 @@ def _fit_realtime_fixed_window(
     train_upper = train_df["y"].quantile(0.995)
     train_df["y_clipped"] = train_df["y"].clip(lower=-100, upper=train_upper)
 
+    # ── Compute sample weights by profile ────────────────────────────
+    # If sample_weight_profile is None → use EXISTING hardcoded weights.
+    # If set to a profile name → use profile-based weights for ALL periods.
+    use_profile_weights = sample_weight_profile is not None
+
     train_valley = train_df[train_df["hour"].isin(VALLEY_HOURS)]
     test_valley = test_df_raw[test_df_raw["hour"].isin(VALLEY_HOURS)]
+    w_valley = _compute_spike_weights(train_valley, sample_weight_profile) if use_profile_weights else np.ones(len(train_valley))
     model_valley_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
@@ -93,6 +161,7 @@ def _fit_realtime_fixed_window(
         ),
         train_valley[predictor.features_list],
         train_valley["y_clipped"],
+        sample_weight=w_valley,
         eval_set=[(test_valley[predictor.features_list], test_valley["y"])],
         eval_metric="l1",
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
@@ -100,10 +169,13 @@ def _fit_realtime_fixed_window(
 
     train_solar = train_df[train_df["hour"].isin(SOLAR_HOURS)]
     test_solar = test_df_raw[test_df_raw["hour"].isin(SOLAR_HOURS)]
-    w_solar = np.ones(len(train_solar))
-    y_solar_val = train_solar["y_clipped"].values
-    w_solar[y_solar_val < 50] = 2
-    w_solar[y_solar_val < 0] = 5
+    if use_profile_weights:
+        w_solar = _compute_spike_weights(train_solar, sample_weight_profile)
+    else:
+        w_solar = np.ones(len(train_solar))
+        y_solar_val = train_solar["y_clipped"].values
+        w_solar[y_solar_val < 50] = 2
+        w_solar[y_solar_val < 0] = 5
     model_solar_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
@@ -123,7 +195,7 @@ def _fit_realtime_fixed_window(
         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
     )
 
-    y_solar_class = (y_solar_val < 0).astype(int)
+    y_solar_class = (train_solar["y_clipped"] < 0).astype(int)
     y_solar_test_class = (test_solar["y"] < 0).astype(int)
     model_solar_clf = predictor._fit_with_cuda_fallback(
         lgb.LGBMClassifier(
@@ -145,9 +217,12 @@ def _fit_realtime_fixed_window(
 
     train_peak = train_df[train_df["hour"].isin(PEAK_HOURS)]
     test_peak = test_df_raw[test_df_raw["hour"].isin(PEAK_HOURS)]
-    w_peak = np.ones(len(train_peak))
-    high_wind_threshold = train_peak["wind"].quantile(0.8)
-    w_peak[train_peak["wind"] > high_wind_threshold] = 3
+    if use_profile_weights:
+        w_peak = _compute_spike_weights(train_peak, sample_weight_profile)
+    else:
+        w_peak = np.ones(len(train_peak))
+        high_wind_threshold = train_peak["wind"].quantile(0.8)
+        w_peak[train_peak["wind"] > high_wind_threshold] = 3
     model_peak_reg = predictor._fit_with_cuda_fallback(
         lgb.LGBMRegressor(
             objective="regression",
@@ -302,6 +377,7 @@ def run_precision_simulation(
     use_predicted_temp=False,
     training_months=12,
     val_ratio=0.2,
+    sample_weight_profile: str | None = None,
 ):
     predictor = LGBMPowerPredictor()
     inference = PowerInference(model_path=None)
@@ -337,6 +413,7 @@ def run_precision_simulation(
                 target=target,
                 raw_df=working_raw_df,
                 val_ratio=val_ratio,
+                sample_weight_profile=sample_weight_profile,
             )
             inference_start = current_target_date.strftime("%Y-%m-%d 01:00:00")
             inference_end = (current_target_date + datetime.timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
@@ -444,6 +521,7 @@ def run_lgbm_pipeline(
     use_predicted_temp=False,
     training_months=12,
     val_ratio=0.2,
+    sample_weight_profile: str | None = None,
 ):
     if "日前" in target:
         return run_precision_simulation_da(
@@ -462,6 +540,7 @@ def run_lgbm_pipeline(
         use_predicted_temp=use_predicted_temp,
         training_months=training_months,
         val_ratio=val_ratio,
+        sample_weight_profile=sample_weight_profile,
     )
 
 

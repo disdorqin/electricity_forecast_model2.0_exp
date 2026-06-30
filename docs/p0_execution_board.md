@@ -1,7 +1,7 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 0.7 — PR #5 Conflict Resolution]`
+> **Status**: `[Phase 2 COMPLETE — GO achieved — P3 in progress]`
 > **Runner branch**: `agent/p0-threshold-tuning`
 
 ---
@@ -137,3 +137,4 @@ Round-trip (all 24 hours):                      ✓
 | 3b | — | Conservative/medium/aggressive pass | `PENDING` |
 | 4a | `evaluate_p0_realtime_spike_full.py` | Unified evaluation | `PENDING` |
 | 4b | SA4 report | GO/NO-GO decision | `PENDING` |
+| — | **P3** | **Rolling Fusion + Leakage Fix** | **ACTIVE** — see `docs/p3_execution_board.md` |

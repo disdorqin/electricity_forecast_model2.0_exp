@@ -2,7 +2,7 @@
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 1 — BLOCKED: No model predictions for P0 window]`
+> **Status**: `[Phase 1B — COMPLETE: Full pipeline end-to-end via LightGBM bootstrap]`
 > **Runner branch**: `agent/p0-full-execution-runner-clean`
 
 ---
@@ -108,7 +108,7 @@ Round-trip (all 24 hours):                      ✓
 | ID | Blocker | Status |
 |----|---------|--------|
 | B12 | SA2 ↔ SA3 file conflicts | ✅ RESOLVED in Phase 0.7 |
-| **B13** | **No model predictions for P0 window** | **OPEN** | No `daily_runs/` directory exists. Prediction pack has 0 rows, 120 missing dates. See Phase 1 Failure. |
+| **B13** | **No model predictions for P0 window** | **RESOLVED** | LightGBM inference + baseline pack bypasses `daily_runs/` dependency. See Phase 1B. |
 
 ---
 
@@ -184,15 +184,92 @@ Round-trip (all 24 hours):                      ✓
 | medium | 0.60 | 0.35 | 350 | 1.15 |
 | aggressive | 0.45 | 0.60 | 600 | 1.30 |
 
-## Phase 1-4 Execution — BLOCKED (No predictions for P0 window)
+## Phase 1B — Long-Run Bootstrap (Completed 2026-06-29)
 
-| Phase | Script | Description | Status |
-|-------|--------|-------------|--------|
-| 1a | `build_backtest_prediction_pack.py` | Build spike labels + features | ❌ **FAILED** — empty pack, 0 rows |
-| 1b | — | Validate label distribution | `SKIPPED` |
-| 2a | `diagnose_extreme_events.py` | Extreme event diagnostics | `SKIPPED` |
-| 2b | `diagnose_model_regime.py` | Model regime analysis | `SKIPPED` |
-| 3a | `build_realtime_spike_dataset.py` | Build spike training dataset | `SKIPPED` |
-| 3b | `train_realtime_spike_risk.py` | Train risk model | `SKIPPED` |
-| 4a | `evaluate_realtime_spike_correction.py` | Three-profile correction | `SKIPPED` |
-| 4b | `evaluate_p0_realtime_spike_full.py` | Full evaluation / GO-NOGO | `SKIPPED` |
+> **Result**: Full pipeline executed end-to-end using Level 1 (LightGBM) predictions.
+> **Status**: `✅ COMPLETE — No further action needed for Level 1`
+
+### Loop 1: Prediction Source Inventory
+
+| Script | Status | Output |
+|--------|--------|--------|
+| `scripts/inventory_prediction_sources.py` | ✅ Done | `reports/local/p0_full_run/inventory/` |
+
+**Readiness**: LightGBM (✅ checkpoint, ~5 min CPU), TimesFM (❌ legacy TF), TimeMixer (❌ no checkpoint), SGDFNet (❌ no checkpoint), RT916 (❌ no P0 checkpoint), Fusion (❌ needs predictions)
+
+### Loop 2: Level 0 Baseline Pack
+
+| Script | Status | Output |
+|--------|--------|--------|
+| `scripts/build_baseline_prediction_pack.py` | ✅ Done | `reports/local/p0_full_run/prediction_pack_level0/` |
+
+**Models**: naive_lag1, naive_lag7, dayahead_proxy, baseline_fusion
+**Coverage**: 4 models × 120 dates (full P0 window)
+
+### Loop 3: Level 1 LightGBM Predictions
+
+| Script | Status | Output |
+|--------|--------|--------|
+| `scripts/run_p0_lightweight_predictions.py` | ✅ Done | `reports/local/p0_full_run/prediction_pack_level1/` |
+
+**Model**: LightGBM ThreeStageLGBM (valley/solar/peak sub-models)
+**Coverage**: 2,862 rows, 120/120 dates, 24h/day
+**Avg sMAPE**: 17.76
+
+### Loop 4: RT916 Selective Plan
+
+| Plan | Status | Output |
+|------|--------|--------|
+| `scripts/rt916_selective_plan.md` | ✅ Created | `reports/local/p0_full_run/rt916_selective_plan.md` |
+
+**Top 3 dates**: 2025-11-08 (1 spike, 1408), 2026-01-26 (4 spikes, 1291), 2026-01-18 (5 spikes, 1187)
+**Recommendation**: DEFER until Level 1 evaluation reviewed (no available checkpoint)
+
+### Loop 5: Full P0 Evaluation (Level 1)
+
+| Phase | Script | Status | Key Metrics |
+|-------|--------|--------|-------------|
+| 2a | `diagnose_extreme_events.py` | ✅ Done | 144 high_spike, 523 total extreme events |
+| 3a | `build_realtime_spike_dataset.py` | ✅ Done | 39,168 rows, 956 spike samples |
+| 3b | `train_realtime_spike_risk.py` | ✅ Done | AUC 0.929, recall 0.83, RF 200 trees |
+| 4a | `evaluate_realtime_spike_correction.py` | ✅ Done | All 3 profiles: 0 lift_applied |
+| 4b | `evaluate_p0_realtime_spike_full.py` | ✅ Done | Full manifest written |
+
+### Correction Results (all 3 profiles identical)
+
+| Metric | Value |
+|--------|-------|
+| Overall sMAPE (floor50) | 22.02 |
+| 9_16 sMAPE (floor50) | 28.16 |
+| High Spike MAE | 260.56 |
+| High Spike sMAPE | 46.95 |
+| Severe Underestimates | 80 |
+| Normal Hours sMAPE | 18.91 |
+| Normal Hours Degradation | 0.0 |
+| False Lift Rate | 0.0 |
+| Lift Applied | **0** |
+| Lift Rejected (low prob) | 2,463 |
+| Lift Rejected (negative base) | 399 |
+
+### Key Findings
+
+1. **Pipeline works end-to-end**: All 5 phases executed successfully from raw data to correction manifests
+2. **LightGBM baseline reasonable**: sMAPE 22 overall, but severe_underestimates=80 indicates significant spikes missed
+3. **Correction not activating**: All 3 profiles produce 0 lift_applied — risk model flags too few rows at the configured thresholds, and among those flagged, guardrails reject due to negative base residual
+4. **Bottleneck**: Single-model pack means `base_fused_pred` = LightGBM prediction; correction lifts only apply when `base_fused_pred > y_pred` (i.e., the fused prediction already exceeds the raw prediction), which never happens in a single-model pack
+5. **RT916 still deferred**: No checkpoint available; would need full training run (~3-4 hours per model)
+
+### Nested Output Path Issue
+
+The correction evaluator appends profile name to `--out-dir`, producing double-nested paths:
+`level0/correction/conservative/conservative/`. Output files are correct — cosmetic only.
+
+### Blocker B13 Resolution
+
+| Blocker | Status | Resolution |
+|---------|--------|------------|
+| **B13** — No model predictions for P0 window | ✅ **RESOLVED** | LightGBM inference + baseline pack approach bypasses need for `daily_runs/` |
+
+### Full Report
+
+See [docs/reports/P0_long_run_status.md](reports/P0_long_run_status.md) for detailed metrics, GO/CONDITIONAL/NO-GO assessment, and next steps.

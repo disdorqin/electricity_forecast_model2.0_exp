@@ -22,6 +22,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Ensure project root in sys.path for schema import
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from extreme.realtime_high_spike.schema import ALL_EXCLUDED_COLS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -90,9 +97,12 @@ def main():
         logger.error("spike_label column not found in dataset")
         sys.exit(1)
 
-    # Prepare features
+    # Prepare features — exclude ALL actual-value and target-leakage columns
+    # Using ALL_EXCLUDED_COLS from schema.py for leakage-safe feature selection.
     exclude_cols = {"ds", "spike_label", "model_name", "_source", "_source_file",
-                    "realtime_price", "dayahead_price", "y_true", "hour", "hour_business", "weekday"}
+                    "realtime_price", "dayahead_price", "y_true", "hour", "hour_business",
+                    "weekday", "y_pred", "final_pred", "base_fused_pred"}
+    exclude_cols.update(ALL_EXCLUDED_COLS)
     feature_cols = [c for c in df.columns if c not in exclude_cols and df[c].dtype in (np.float64, np.int64, np.float32, np.int32)]
 
     # Drop constant columns

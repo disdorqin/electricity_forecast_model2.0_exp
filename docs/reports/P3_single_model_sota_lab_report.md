@@ -155,11 +155,67 @@ Paper/SOTA recommendation:               — LightGBM enhancement + ablation stu
 
 ---
 
-## 8. Files Changed
+---
+
+## Walk-forward LightGBM SOTA
+
+After the fixed-window experiments, the top P3 candidate was evaluated in a
+**daily walk-forward** setting to assess real production impact.
+
+### Methodology
+
+| Aspect | Setting |
+|--------|---------|
+| Daily retrain | ❌ **No** — Used existing daily walk-forward predictions from level1 pack |
+| Rolling calibration | ✅ Period-aware bias from [D-30, D-1] window, applied per day |
+| Spike correction | ✅ Residual quantile (85th) from high-price days (y_true > 400) in calibration window |
+| Leakage-safe | ✅ `--no-leakage` removes D-day stats from calibration |
+| Lookback | 30-day rolling |
+| Period | 2025-11-01 → 2026-02-28 (120 days) |
+| Runtime | ~0.1s per profile (post-hoc only) |
+
+### Results
+
+```
+Profile           Raw sMAPE   P3 sMAPE     MAE     Severe
+----------------------------------------------------------
+baseline (calib)    26.40      26.23      73.50      9
+spike_weighted      26.40      26.29      73.92      9
+all + no-leakage    26.40      26.29      73.92      9
+```
+
+### Verdict
+
+| Question | Answer |
+|----------|--------|
+| 1. Daily retrain used? | ❌ No — post-hoc calibration on existing predictions |
+| 2. Rolling calibration used? | ✅ Yes — 30d period-aware bias per day |
+| 3. Leakage-safe? | ✅ Yes (all profile with --no-leakage) |
+| 4. Runtime | ~0.1s — trivial |
+| 5. sMAPE (raw → final) | 26.40 → 26.23 (−0.17) |
+| 6. severe_underestimate | 7 → 9 (slight degradation) |
+| 7. Beats LightGBM reference (22.02)? | ❌ **No** — 26.23 vs 22.02 |
+| 8. Beats Phase2 fusion (20.86)? | ❌ **No** |
+| 9. Worth P3 mainline? | ⚠️ **Directional only** — post-hoc gains are marginal (−0.17 sMAPE) |
+
+### Critical Finding
+
+The reference baseline sMAPE of 22.02 was measured on a different/smaller window.
+On the 2025-11 → 2026-02 window, actual LightGBM daily walk-forward is **sMAPE 26.40**.
+The P3 spike-weighted profile showed **−1.4 sMAPE gain in fixed-window** testing,
+but this gain **does not transfer to post-hoc correction on daily-retrained predictions**
+because the daily retrain already captures temporal adaptation.
+
+**To realize P3 gains in production**, spike weighting must be integrated directly into
+the daily training loop (lightGBM rolling OOF adapter's `fold_train_predict`),
+not applied as a post-hoc correction.
+
+### Updated Files
 
 | File | Change |
 |------|--------|
 | `scripts/train_lightgbm_p3_sota.py` | **New** — Enhanced LightGBM with 5 profiles |
 | `scripts/evaluate_lightgbm_p3_sota.py` | **New** — Profile comparison and evaluation |
-| `docs/reports/P3_single_model_sota_lab_report.md` | **New** — This report |
-| `reports/local/p3_sota_lab/` | **New** — 8 experiment result JSONs + predictions |
+| `scripts/evaluate_lightgbm_p3_walkforward.py` | **New** — Walk-forward SOTA evaluation |
+| `docs/reports/P3_single_model_sota_lab_report.md` | **Updated** — This report with walk-forward section |
+| `reports/local/p3_sota_lab/` | **New** — 11 experiment result JSONs + predictions |

@@ -263,8 +263,13 @@ def run_evaluation(
     history_path: Optional[Path],
     profile: CorrectionProfile,
     out_dir: Path,
+    timestamp_level: bool = True,
 ) -> dict[str, Any]:
     """Run evaluation for a single profile.
+
+    Args:
+        timestamp_level: If True, deduplicate to 1 row per timestamp
+            (business_day, hour_business) before computing metrics.
 
     Returns metrics dict.
     """
@@ -286,6 +291,22 @@ def run_evaluation(
     # Save full result
     result_csv = out_dir / "correction_result.csv"
     result.to_csv(result_csv, index=False)
+
+    # Deduplicate to timestamp level if requested
+    if timestamp_level:
+        ts_key = None
+        for k in ("business_day", "ds_date"):
+            if k in result.columns:
+                ts_key = k
+                break
+        hb_key = "hour_business" if "hour_business" in result.columns else "hour"
+        if ts_key and hb_key in result.columns:
+            n_before = len(result)
+            result = result.drop_duplicates(subset=[ts_key, hb_key]).copy()
+            n_after = len(result)
+            if n_after < n_before:
+                print(f"  [INFO] Timestamp-level dedup: {n_before} -> {n_after} rows "
+                      f"({(1 - n_after / n_before) * 100:.1f}% reduction)")
 
     # Compute metrics
     metrics = compute_all_metrics(result)
@@ -372,6 +393,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         choices=["true", "false"])
     parser.add_argument("--period-aware", type=str, default=None,
                         choices=["true", "false"])
+    parser.add_argument("--timestamp-level", action="store_true", default=True,
+                        help="Deduplicate to (business_day, hour_business) for metrics")
 
     return parser.parse_args(argv)
 
@@ -442,6 +465,7 @@ def main() -> None:
             history_path=hist_path,
             profile=profile,
             out_dir=out_dir,
+            timestamp_level=args.timestamp_level,
         )
 
         all_metrics[pname] = metrics

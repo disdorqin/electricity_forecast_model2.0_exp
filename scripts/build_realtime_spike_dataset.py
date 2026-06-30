@@ -5,6 +5,12 @@ build_realtime_spike_dataset.py — Build spike training dataset from prediction
 
 Extracts feature-target pairs for spike risk modeling.
 
+Leakage-safe column handling:
+  - After merging raw data with predictions, all ACTUAL_VALUE_EXCLUDE_COLS
+    are dropped before feature construction.
+  - Only prediction-derived + calendar features are kept for training.
+  - y_true and spike_label retained only for evaluation/labeling.
+
 Unified CLI:
   --data-path, --runs-root, --prediction-pack, --target,
   --start-date, --end-date, --out-dir
@@ -14,11 +20,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# Ensure project root in sys.path for schema import
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +38,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("build_realtime_spike_dataset")
+
+from extreme.realtime_high_spike.schema import ACTUAL_VALUE_EXCLUDE_COLS
 
 
 def parse_args(argv=None):
@@ -148,6 +162,20 @@ def main():
 
     # Build features
     feature_df = build_features(merged, args)
+
+    # Leakage-safe column whitelist: drop raw ACTUAL_VALUE_EXCLUDE_COLS
+    # that may have leaked through the raw-data merge.
+    cols_before = set(feature_df.columns)
+    keep_exceptions = {"realtime_price", "dayahead_price", "y_true", "spike_label", "ds"}
+    safe = [c for c in feature_df.columns
+            if c not in ACTUAL_VALUE_EXCLUDE_COLS or c in keep_exceptions]
+    dropped = cols_before - set(safe)
+    if dropped:
+        logger.info(
+            "Dropped %d actual-value columns from dataset: %s",
+            len(dropped), sorted(dropped)[:10],
+        )
+    feature_df = feature_df[safe].copy()
 
     # Save
     spike_csv = out_dir / "spike_training_dataset.csv"

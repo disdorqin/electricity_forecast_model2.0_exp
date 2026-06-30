@@ -162,3 +162,40 @@ All aggressive profiles (and all relaxed modes) produce false lift rates >75%, c
 ### Mean fusion degradation
 
 Simple mean fusion degrades base prediction quality (sMAPE 24.46 vs 21.20 for anchored), causing the correction to work from a worse starting point. The anchored approach preserves LightGBM accuracy while still enabling correction.
+
+---
+
+## 13. SA1 Leakage & Metric Audit Summary
+
+**Audit Date**: 2026-06-30
+**Auditor**: SA1 (Contract + Leakage)
+**Trust Level**: **TRUSTED_WITH_LIMITATIONS**
+
+### Key SA1 Findings
+
+| Dimension | Verdict |
+|-----------|---------|
+| Leakage (correction pipeline) | ✅ **CLEAN** — no actual-value columns used as prediction-time features |
+| Leakage (risk model training) | ⚠️ **FIXES NEEDED** — ACTUAL_COLS not excluded from spike risk training features; placeholder script uses y_true |
+| Business time mapping | ✅ **CORRECT** — `hour=0→hb=24, business_day=D-1` consistently applied |
+| Timestamp-level metrics | ✅ **CORRECT** — GO decisions use deduplicated (1 row per timestamp) metrics |
+| Correction mode | ✅ **CORRECT** — GO uses `normal` mode; `relaxed` correctly marked offline-only |
+| Required P1 fixes | FIX-01: exclude ACTUAL_COLS in train; FIX-02: replace y_true placeholder |
+
+### SA4 GO/NO-GO Incorporation
+
+Based on SA1 findings and Phase 2 metric results, SA4 determined:
+
+- **Offline GO**: All metric thresholds met (sMAPE 20.86 ≤ 22.02, severe 63 < 80, false lift 7.0% ≤ 15%, degrad -0.33 ≤ 0.5)
+- **Production CONDITIONAL**: Requires FIX-01, FIX-02, multi-model predictions, and 30-day ledger validation
+- See [docs/p0_go_nogo_decision.md](../p0_go_nogo_decision.md) for full decision report
+
+### P0 Phase 2 Closure Summary
+
+| Item | Status |
+|------|--------|
+| Phase 2 anchored fusion evaluation | ✅ Complete |
+| SA1 leakage/metric audit | ✅ TRUSTED_WITH_LIMITATIONS |
+| SA4 GO/NO-GO decision | ✅ **Offline GO / Production CONDITIONAL** |
+| PR #9 merge readiness | ✅ **Ready** |
+| Recommended next phase | **P3 — Multi-model + ledger validation** |

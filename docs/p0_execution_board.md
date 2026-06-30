@@ -1,7 +1,7 @@
 # P0 Realtime High Spike — Execution Board
 
 > **Purpose**: Track all tasks across the P0 full execution pipeline.
-> **Status**: `[Phase 2.5 — SA1 COMPLETE — TRUSTED_WITH_LIMITATIONS — Wait for SA4]`
+> **Status**: `[Phase 2.5 — SA4 COMPLETE — OFFLINE GO / PRODUCTION CONDITIONAL]`
 > **Runner branch**: `agent/p0-phase2-anchored-fusion-run`
 
 ---
@@ -14,7 +14,7 @@
 | **SA1 (Contract Fix)** | `origin/agent/p0-residual-lift-guardrail` | Contract unification | `ON tune-timemixer` |
 | **SA2 (Path Compat)** | `origin/agent/p0-path-compat` | P0 scripts + path compat | `MERGED to tune-timemixer` |
 | **SA3 (Threshold Tuning)** | `agent/p0-phase2-anchored-fusion-run` | Correction profile tuning + anchored fusion | `COMPLETE — GO achieved` |
-| **SA4 (Final Report)** | `TBD` | Consolidation report | `PENDING` |
+| **SA4 (Final Report)** | `agent/p0-phase2-anchored-fusion-run` | GO/NO-GO decision | `COMPLETE — OFFLINE GO` |
 
 ---
 
@@ -376,9 +376,9 @@ In Phase 1B, `base_fused_pred = y_pred` (single-model), blocked by negative-base
 
 | ID | Blocker | Status | Details |
 |----|---------|--------|---------|
-| **B14** | SA1 leakage/metric audit | ⚠️ **TRUSTED_WITH_LIMITATIONS** | See audit report at `docs/reports/P0_phase2_leakage_metric_audit.md` |
-| **B15** | SA4 final GO/NO-GO report | PENDING | Waiting for SA4 |
-| **B16** | PR #9 merge blocked | WAITING for B14 + B15 | B14 resolved, waiting for B15 |
+| **B14** | SA1 leakage/metric audit | ✅ **TRUSTED_WITH_LIMITATIONS** | See audit report at `docs/reports/P0_phase2_leakage_metric_audit.md` |
+| **B15** | SA4 final GO/NO-GO report | ✅ **COMPLETE — OFFLINE GO** | See `docs/p0_go_nogo_decision.md` |
+| **B16** | PR #9 merge blocked | ⚠️ **READY — pending merge** | B14 + B15 resolved |
 
 ### SA1 Audit Summary
 
@@ -401,6 +401,7 @@ In Phase 1B, `base_fused_pred = y_pred` (single-model), blocked by negative-base
 ### Next Actions
 
 1. ✅ SA1 leakage/metric audit complete — TRUSTED_WITH_LIMITATIONS
-2. Wait for SA4 final GO/NO-GO report (B15)
-3. Once B15 clear: merge PR #9 to `tune-timemixer`
+2. ✅ SA4 final GO/NO-GO report complete — OFFLINE GO / PRODUCTION CONDITIONAL
+3. Merge PR #9 to `tune-timemixer`
 4. SA2: Apply FIX-01 and FIX-02 in separate PR
+5. → P3: Multi-model predictions + ledger validation

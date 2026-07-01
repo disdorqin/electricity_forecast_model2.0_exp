@@ -219,7 +219,7 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 | **W1** | Data + Pack Auditor | `tune-timemixer` | Audit feature leakage, pack quality, data integrity issues | `ACTIVE` |
 | **W2** | SOTA Model Tuning | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
 | **W3** | Spike Module / Risk Gate | `tune-timemixer` | Risk model calibration, spike detection improvement | `ACTIVE` |
-| **W4** | Fusion + Correction Finalizer | `tune-timemixer` | Final fusion + correction pipeline tuning | `ACTIVE` |
+| **W4** | Fusion + Correction Finalizer | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning | `ACTIVE — PENDING INPUTS (W2, W3)` |
 
 ### Results Log
 
@@ -247,4 +247,5 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 4. 🏃 **P4 W0**: Maintain board, receive results from W1–W4
 5. 🏃 **P4 W1–W4**: Each window runs independent experiments
 6. 🎯 **Decision gate**: First candidate that meets DEPLOY GO → merge as new champion
-7. 🎯 **Fallback**: If no P4 candidate beats Phase 2, deploy Phase 2 champion as production candidate
+7. 🏃 **P4 W4**: Skeleton ready at `scripts/evaluate_p4_final_fusion_correction.py` — waiting for W2 →window2-csv and W3 →window3-csv
+8. 🎯 **Fallback**: If no P4 candidate beats Phase 2, deploy Phase 2 champion as production candidate

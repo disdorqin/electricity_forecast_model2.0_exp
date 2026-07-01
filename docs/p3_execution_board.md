@@ -191,6 +191,22 @@ Combines P3.1 rolling severe_softmax base with Phase2 correction pipeline.
 |-------|-------|
 | Status | `PLANNED` |
 
+### Line I: P4 Canonical Evaluation Pack
+
+> **Goal**: Create the locked-down evaluation pack that ALL P4 windows must use. Lock date range 2025-11-01~2026-02-28, timestamp-level metrics, (business_day, hour_business) key, Phase2 champion reproduction.
+
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p4-canonical-eval-pack` |
+| Script | `scripts/build_p4_canonical_eval_pack.py` |
+| Test | `tests/test_p4_canonical_eval_pack.py` |
+| Report | `docs/reports/P4_canonical_eval_pack_report.md` |
+| Pack location | `reports/local/p4_canonical/` (gitignored) |
+| Phase2 sMAPE reproduction | 20.8675 (expected 20.86, Δ=0.0075) ✅ |
+| Phase2 severe reproduction | 63 (exact) ✅ |
+| Timestamps | 2879/2880 (1 missing: 2026-02-28 hb=24, maps to 2026-03-01) |
+| Status | `COMPLETE — READY` |
+
 ---
 
 ## P4 Five-Window Focus Sprint

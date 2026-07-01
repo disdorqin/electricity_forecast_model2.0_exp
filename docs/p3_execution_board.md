@@ -1,11 +1,11 @@
 # P3 Rolling Fusion + SOTA Lab — Execution Board
 
 > **Purpose**: Track all tasks across the P3 execution pipeline.
-> **Status**: `[P3a–P3.2 COMPLETE (all NO-GO) — P3.3 PARALLEL SPRINT ACTIVE]`
+> **Status**: `[P3a–P3.3 COMPLETE (all NO-GO) — P3.4 CANDIDATE COMBINATION ACTIVE]`
 > **Branch**: `tune-timemixer`
 > **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.86, severe=63)
 > **PR #10**: ✅ MERGED — tooling/leakage-fix/experiment framework
-> **PR #11**: OPEN — P3.1 severe-aware rolling (NO-GO, but mergeable as experiment tooling)
+> **PR #11**: ✅ MERGED — P3.1 severe-aware rolling (NO-GO, research tooling)
 
 ---
 
@@ -13,13 +13,13 @@
 
 | Role | Branch | Scope | Status |
 |------|--------|-------|--------|
-| **Runner (orchestrator)** | `tune-timemixer` | P3.3 parallel sprint coordinator | `ACTIVE` |
-| **A: Severe-Constrained Correction** | `agent/p33-severe-constrained-correction` | Correction → severe penalty optimization | `ACTIVE` |
-| **B: Spike-Gated Uplift** | `agent/p33-spike-gated-uplift` | Separate uplift model for spike hours | `PLANNED` |
-| **C: Extra Prediction Signal** | `agent/p33-extra-prediction-signal` | RT916 / TimesFM integration | `PLANNED` |
-| **D: LightGBM Internal Weighting** | `agent/p33-lgbm-internal-weighting` | Sample-weighted LightGBM retrain | `PLANNED` |
+| **Runner (orchestrator)** | `tune-timemixer` | P3.4 candidate combination sprint | `ACTIVE` |
+| **E: Weighted-LGBM + Fusion** | `agent/p34-weighted-lgbm-phase2-fusion` | Weighted-LGBM base → Phase2 fusion/correction | `EVALUATING` |
+| **F: PR Cleanup + Tooling Merge** | `tune-timemixer` | PR #11/#12/#13 merge, NO-GO verdicts | `ACTIVE` |
+| **G: TimesFM Diversity Smoke** | `agent/p34-timesfm-diversity-smoke` | TimesFM extra model column fusion smoke test | `ACTIVE` |
+| **H: P3/Paper Decision Report** | — | Document P3 outcome, lessons, paper viability | `PLANNED` |
 | **SA1 (Leakage Fix)** | `tune-timemixer` | FIX-01–FIX-04 + schema.py | `✅ MERGED via PR #10` |
-| **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 pending` |
+| **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 MERGED` |
 | **P3.2 (Rolling+Correction)** | `tune-timemixer` | rolling + correction combo | `✅ MERGED via PR #10 (NO-GO)` |
 
 ---
@@ -37,26 +37,12 @@
 | P3d: Actual evaluation run | DONE | VERDICT: NO-GO — severe underestimate threshold not met |
 | P3.1: Severe-aware rolling fusion | DONE | 3 new modes: severe_softmax, severe_anchor, quantile_guarded. All NO-GO |
 | P3.2: Rolling base + spike correction | DONE | Combined rolling severe_softmax + Phase2 correction. VERDICT: NO-GO |
-
----
-
-## Files Changed
-
-| File | Change |
-|------|--------|
-| `extreme/realtime_high_spike/schema.py` | NEW — leakage-safe column schema |
-| `scripts/train_realtime_spike_risk.py` | FIX-01 — import ALL_EXCLUDED_COLS |
-| `scripts/predict_realtime_spike_risk.py` | FIX-02 — y_true-free heuristic + model loading |
-| `scripts/build_realtime_spike_dataset.py` | FIX-03 — whitelist drop ACTUAL_VALUE_EXCLUDE_COLS |
-| `scripts/evaluate_realtime_spike_correction.py` | FIX-04 — timestamp-level dedup arg |
-| `scripts/run_rolling_30d_fusion.py` | NEW — rolling weight fusion with 4 modes |
-| `scripts/evaluate_p3_rolling_sota_summary.py` | NEW — unified comparison + verdict |
-| `tests/test_realtime_spike_no_leakage.py` | NEW — 5 leakage safety tests |
-| `docs/P3_single_model_sota_lab.md` | NEW — SOTA experiment plan |
-| `docs/p3_execution_board.md` | NEW — this board |
-| `scripts/evaluate_p32_rolling_base_correction.py` | NEW — P3.2 rolling base + correction eval |
-| `tests/test_p32_rolling_base_correction.py` | NEW — 8 P3.2 tests |
-| `docs/reports/P32_rolling_base_correction_report.md` | NEW — P3.2 findings |
+| P3.3 Sprint A: Correction grid | DONE | 192 combos searched, 0 meet GO. NO-GO |
+| P3.3 Sprint B: Spike-gated uplift | DONE | sMAPE=22.68, severe=76. NO-GO |
+| P3.3 Sprint C: Extra prediction signal | DONE | TimesFM diversity smoke. NO-GO |
+| P3.3 Sprint D: LightGBM weighting | DONE | sMAPE=23.76, severe=54. NO-GO |
+| P3.4 Line E: Weighted LGBM + Phase2 fusion | DONE | sMAPE=23.63, severe=116. Weighted LGBM degrades on full window. **NO-GO** |
+| P3.4 Line G: TimesFM diversity smoke | DONE | No diversity benefit from TimesFM as extra model column |
 
 ---
 
@@ -132,11 +118,9 @@ Combines P3.1 rolling severe_softmax base with Phase2 correction pipeline.
 | Conservative | 20.99 | 86 | 0.004 | 0.00 | NO-GO |
 | Aggressive | 23.84 | 64 | 0.749 | 3.30 | NO-GO |
 
-**Key finding**: Correction reduces severe from 88→73 (medium) and improves sMAPE to 20.74 (best-ever), but no profile achieves both sMAPE ≤ 19.50 AND severe ≤ 63. Rolling base re-evaluated at sMAPE=21.00 (not 19.10 as originally reported — per-timestamp avg was misleading).
+**Key finding**: Correction reduces severe from 88→73 (medium) and improves sMAPE to 20.74 (best-ever), but no profile meets both thresholds.
 
-**Verdict: NO-GO** — P3.2 medium is the best combined result (sMAPE=20.74, severe=73) but does not meet either primary GO threshold.
-
-Phase 2 best (static anchor_90 + medium correction) remains the best known candidate.
+**Verdict: NO-GO** — Phase 2 best (static anchor_90 + medium correction) remains best known candidate.
 
 ---
 
@@ -144,7 +128,6 @@ Phase 2 best (static anchor_90 + medium correction) remains the best known candi
 
 > **Goal**: Find ANY configuration that simultaneously beats sMAPE ≤ 20.50 AND severe ≤ 63.
 > **Baseline**: Phase 2 champion — sMAPE=20.86, severe=63.
-> **Evaluation**: All windows must report using the unified criteria below.
 
 ### Unified Evaluation Criteria
 
@@ -154,43 +137,81 @@ Phase 2 best (static anchor_90 + medium correction) remains the best known candi
 | **RESEARCH GO** | ≤ 20.00 | ≤ 70 | ≤ 12% | ≤ 1.0 | Promising — iterate |
 | **NO-GO** | > 20.86 | > 70 | > 15% | > 1.0 | Stop — do not merge |
 
-Note: sMAPE beats Phase 2 alone is insufficient. Both sMAPE AND severe must beat Phase 2 simultaneously.
-
-### Sprint Line A: Severe-Constrained Correction Search
+### Sprint A: Severe-Constrained Correction (COMPLETE)
 
 | Field | Value |
 |-------|-------|
 | Branch | `agent/p33-severe-constrained-correction` |
-| Approach | Phase 2 correction profiles → add severe underestimate penalty |
-| Goal | Keep correction (which works well for severe) + tune profile to further reduce severe |
-| Starting point | Phase 2 medium (severe=63). Target severe ≤ 55 without regressing sMAPE above 20.86 |
-| Status | `ACTIVE` |
+| Approach | Grid search over 192 correction param combos (5 profile families) |
+| Best result | severe=69, sMAPE=20.92, false_lift=7.6% (spike_prob_threshold=0.60, boost=1.50) |
+| Status | `COMPLETE — NO-GO` |
 
-### Sprint Line B: Spike-Gated Uplift Model
+**Result**: 192 combos searched, 53 eligible, **0 meet GO**. Root cause: risk model calibration. Minimum achievable severe is 69.
+
+### Sprint B: Spike-Gated Uplift (COMPLETE)
 
 | Field | Value |
 |-------|-------|
 | Branch | `agent/p33-spike-gated-uplift` |
-| Approach | Train separate uplift model for high-spike-risk hours; gate by spike probability |
-| Goal | Apply extra lift only where spike probability > threshold, reducing false lift on normal hours |
-| Status | `PLANNED` |
+| Result | sMAPE=22.68, severe=76 — **NO-GO**. Research architecture only. PR #13. |
 
-### Sprint Line C: Extra Prediction Signal (RT916 / TimesFM)
+### Sprint C: Extra Prediction Signal / TimesFM (COMPLETE)
 
 | Field | Value |
 |-------|-------|
 | Branch | `agent/p33-extra-prediction-signal` |
-| Approach | Integrate RT916 or TimesFM predictions as additional model columns in multi-candidate pack |
-| Goal | Add signal diversity to reduce systematic underprediction on spike hours |
-| Status | `PLANNED` |
+| Result | See `docs/reports/P33_extra_prediction_signal_report.md`. |
 
-### Sprint Line D: LightGBM Internal Sample Weighting
+### Sprint D: LightGBM Internal Weighting (COMPLETE)
 
 | Field | Value |
 |-------|-------|
 | Branch | `agent/p33-lgbm-internal-weighting` |
-| Approach | Retrain LightGBM with sample weights that penalize spike-hour underestimates |
-| Goal | Improve base prediction quality on spike hours → less correction needed downstream |
+| Result | sMAPE=23.76, severe=54 — **NO-GO** (sMAPE regression). PR #12. |
+
+**P3.3 VERDICT**: All four lines NO-GO. No configuration beats Phase 2 on sMAPE AND severe simultaneously.
+
+---
+
+## P3.4 — Candidate Combination Sprint
+
+> **Goal**: Converge. Combine best P3 signals into single system beating Phase 2 champion.
+> **Baseline**: sMAPE=20.86, severe=63.
+> **Threshold**: DEPLOY GO (sMAPE ≤ 20.50, severe ≤ 63, false lift ≤ 10%, normal degrad ≤ 0.5).
+
+### Line E: Weighted-LightGBM + Phase2 Fusion/Correction
+
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p34-weighted-lgbm-phase2-fusion` |
+| Approach | Weighted-LightGBM (Line D) output → Phase2 fusion + correction pipeline |
+| Rationale | D achieved severe=54 (best-ever) but sMAPE=23.76. Fix sMAPE by fusing with strong baselines. |
+| Fusion modes | weighted_lgbm_anchor_90, weighted_lgbm_anchor_80, custom |
+| Correction profiles | medium, conservative, aggressive (all normal mode) |
+| Status | `EVALUATED — NO-GO` |
+| Best result | sMAPE=23.63, severe=116 — both worse than Phase2 champion |
+| Finding | Weighted LGBM degrades on full window (severe 146 vs standard LGBM 80). Weighting does not generalize beyond the 15-day p33 validation window. Correction cannot recover the loss. |
+
+### Line F: PR Cleanup + Research Tooling Merge
+
+| Field | Value |
+|-------|-------|
+| Scope | PR #11 (P3.1), PR #12 (LGBM weighting), PR #13 (spike-gated uplift) |
+| Status | PR #11: Merged. PR #12/#13: Mergeable, need manual merge via web UI. |
+
+### Line G: TimesFM Diversity Fusion Smoke Test
+
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p34-timesfm-diversity-smoke` |
+| Result | TimesFM predictions do not improve multi-candidate fusion. No diversity benefit. |
+| Status | `COMPLETE — NO-GO` |
+
+### Line H: P3/Paper Decision Report
+
+| Field | Value |
+|-------|-------|
+| Deliverable | Document P3 outcome analysis, root causes, lessons learned, paper viability assessment |
 | Status | `PLANNED` |
 
 ---
@@ -199,21 +220,19 @@ Note: sMAPE beats Phase 2 alone is insufficient. Both sMAPE AND severe must beat
 
 | ID | Blocker | Status |
 |----|---------|--------|
-| ID | Blocker | Status |
-|----|---------|--------|
 | B20 | Rolling fusion severe exceedance | INACTIVE — all rolling approaches produce severe >63 |
 | B21 | SOTA model experiments | DEFERRED — LightGBM tuning scoped but not started |
 | B22 | P3.2 rolling + correction NO-GO | CLOSED — best at severe=73, above threshold |
 | B23 | P3.1 sMAPE re-evaluation | CLOSED — P3.1 rolling base sMAPE is 21.00 (not 19.10) |
-| B24 | **No approach beats Phase 2 simultaneously on sMAPE + severe** | **OPEN — P3.3 sprint objective** |
+| B24 | No approach beats Phase 2 simultaneously on sMAPE + severe | **CLOSED — P3.3 all lines NO-GO. P3.4 opened** |
 
 ## Next Actions
 
 1. ✅ PR #10 merged — tooling/leakage-fix/experiment framework in `tune-timemixer`
-2. ⏳ PR #11 — P3.1 severe-aware rolling (4 files only). Merge as tooling if clean, or close as NO-GO
+2. ✅ PR #11 merged — P3.1 severe-aware rolling (NO-GO, research tooling)
 3. ✅ P3.2 rolling + correction evaluation complete (NO-GO)
-4. 🏃 **P3.3 Sprint A**: Run severe-constrained correction search
-5. 📋 **P3.3 Sprint B**: Scaffold spike-gated uplift model branch
-6. 📋 **P3.3 Sprint C**: Assess RT916/TimesFM checkpoint availability
-7. 📋 **P3.3 Sprint D**: Scaffold LightGBM internal weighting branch
-8. 🎯 **Decision gate**: If no P3.3 line produces DEPLOY GO, deploy Phase 2 champion as production candidate
+4. ✅ P3.3 all four lines complete (all NO-GO)
+5. ✅ **P3.4 Line E**: Complete — sMAPE=23.63, severe=116. **NO-GO**
+6. 📋 **P3.4 Line F**: Clean up and merge PR #12, PR #13 (manual web UI merge needed)
+7. 🏃 **P3.4 Line H**: Draft P3/Paper decision report — Phase 2 champion is final production candidate
+8. 🎯 **Decision gate**: P3.4 Line E NO-GO confirmed. All P3 paths exhausted. **Deploy Phase 2 champion.**

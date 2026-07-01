@@ -1,10 +1,11 @@
 # P3 Rolling Fusion + SOTA Lab — Execution Board
 
 > **Purpose**: Track all tasks across the P3 execution pipeline.
-> **Status**: `[P3a COMPLETE — P3b RUN COMPLETE (NO-GO) — P3c SCOPED — P3d EVALUATED (NO-GO)]`
-> **Branch**: `agent/p3-rolling-fusion-sota`
-> **Verdict**: PR #10 = tooling/leakage-fix/experiment framework merge, NOT a new deployment candidate.
->   Current deployment candidate remains Phase 2: `lightgbm_anchor_90` + `medium` + `normal`.
+> **Status**: `[P3a–P3.2 COMPLETE (all NO-GO) — P3.3 PARALLEL SPRINT ACTIVE]`
+> **Branch**: `tune-timemixer`
+> **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.86, severe=63)
+> **PR #10**: ✅ MERGED — tooling/leakage-fix/experiment framework
+> **PR #11**: OPEN — P3.1 severe-aware rolling (NO-GO, but mergeable as experiment tooling)
 
 ---
 
@@ -12,12 +13,14 @@
 
 | Role | Branch | Scope | Status |
 |------|--------|-------|--------|
-| **Runner (orchestrator)** | `agent/p3-rolling-fusion-sota` | P3 end-to-end | `ACTIVE` |
-| **SA1 (Leakage Fix)** | `agent/p3-rolling-fusion-sota` | FIX-01–FIX-04 + schema.py | `DONE` |
-| **SA3 (Rolling Fusion)** | `agent/p3-rolling-fusion-sota` | run_rolling_30d_fusion.py | `SCRIPT DONE` |
-| **SA4 (Evaluation)** | `agent/p3-rolling-fusion-sota` | evaluate_p3_rolling_sota_summary.py | `SCRIPT DONE` |
-| **P3.1 (Severe-Aware Rolling)** | `agent/p31-severe-aware-rolling` | 3 severe-aware weight modes | `DONE (NO-GO)` |
-| **P3.2 (Rolling Base + Correction)** | `agent/p3-rolling-fusion-sota` | rolling + Phase2 correction combo | `DONE (NO-GO)` |
+| **Runner (orchestrator)** | `tune-timemixer` | P3.3 parallel sprint coordinator | `ACTIVE` |
+| **A: Severe-Constrained Correction** | `agent/p33-severe-constrained-correction` | Correction → severe penalty optimization | `ACTIVE` |
+| **B: Spike-Gated Uplift** | `agent/p33-spike-gated-uplift` | Separate uplift model for spike hours | `PLANNED` |
+| **C: Extra Prediction Signal** | `agent/p33-extra-prediction-signal` | RT916 / TimesFM integration | `PLANNED` |
+| **D: LightGBM Internal Weighting** | `agent/p33-lgbm-internal-weighting` | Sample-weighted LightGBM retrain | `PLANNED` |
+| **SA1 (Leakage Fix)** | `tune-timemixer` | FIX-01–FIX-04 + schema.py | `✅ MERGED via PR #10` |
+| **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 pending` |
+| **P3.2 (Rolling+Correction)** | `tune-timemixer` | rolling + correction combo | `✅ MERGED via PR #10 (NO-GO)` |
 
 ---
 
@@ -137,66 +140,80 @@ Phase 2 best (static anchor_90 + medium correction) remains the best known candi
 
 ---
 
-## P3.1 — Severe-Underestimate-Aware Rolling (Completed 2026-06-30)
+## P3.3 Parallel Sprint
 
-> **Result**: NO-GO — Weight-based severe awareness is directionally correct but insufficient alone.
-> **Branch**: `agent/p31-severe-aware-rolling`
-> **Report**: `docs/reports/P31_severe_aware_rolling_report.md`
+> **Goal**: Find ANY configuration that simultaneously beats sMAPE ≤ 20.50 AND severe ≤ 63.
+> **Baseline**: Phase 2 champion — sMAPE=20.86, severe=63.
+> **Evaluation**: All windows must report using the unified criteria below.
 
-### P3.1 New Weight Modes
+### Unified Evaluation Criteria
 
-| Mode | Mechanism |
-|------|-----------|
-| `severe_softmax` | `score = sMAPE + alpha*severe_rate + beta*underprediction_MAE/200` |
-| `severe_anchor` | LightGBM ≥ 0.85; baselines only if they don't worsen severe rate |
-| `quantile_guarded` | severe_softmax base + upward guard on high-risk 9_16 hours |
+| Tier | sMAPE | Severe | False Lift | Normal Degrad. | Action |
+|------|-------|--------|------------|----------------|--------|
+| **DEPLOY GO** | ≤ 20.50 | ≤ 63 | ≤ 10% | ≤ 0.5 | Merge as deployment candidate |
+| **RESEARCH GO** | ≤ 20.00 | ≤ 70 | ≤ 12% | ≤ 1.0 | Promising — iterate |
+| **NO-GO** | > 20.86 | > 70 | > 15% | > 1.0 | Stop — do not merge |
 
-### P3.1 Results
+Note: sMAPE beats Phase 2 alone is insufficient. Both sMAPE AND severe must beat Phase 2 simultaneously.
 
-| Mode | Config | sMAPE | Severe | Δ sMAPE vs Phase2 | Δ Severe vs Phase2 |
-|------|--------|-------|--------|-------------------|--------------------|
-| Phase2 best (anchor_90+correction) | — | 20.86 | 63 | baseline | baseline |
-| P3 softmax | T=0.1 | 19.86 | 83 | -1.00 ✅ | +20 ❌ |
-| **severe_softmax** | alpha=3.0, beta=1.0 | **19.10** | 80 | **-1.76** ✅ | +17 ❌ |
-| severe_anchor | min=0.85 | 20.45 | 84 | -0.41 ✅ | +21 ❌ |
-| quantile_guarded | risk=0.4, rate=0.04 | 21.14 | **62** | +0.28 ❌ | **-1** ✅ |
-| quantile_guarded | risk=0.5, gentle | 19.09 | 79 | -1.77 ✅ | +16 ❌ |
+### Sprint Line A: Severe-Constrained Correction Search
 
-### P3.1 Verdict
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p33-severe-constrained-correction` |
+| Approach | Phase 2 correction profiles → add severe underestimate penalty |
+| Goal | Keep correction (which works well for severe) + tune profile to further reduce severe |
+| Starting point | Phase 2 medium (severe=63). Target severe ≤ 55 without regressing sMAPE above 20.86 |
+| Status | `ACTIVE` |
 
-| Criterion | Threshold | Best Mode | Met? |
-|-----------|-----------|-----------|------|
-| sMAPE ≤ 20.86 | 20.86 | 19.10 (severe_softmax) | ✅ |
-| Severe ≤ 63 | 63 | 62 (quantile_guarded) | ✅ |
-| Both simultaneously | — | — | **❌ No mode achieves both** |
+### Sprint Line B: Spike-Gated Uplift Model
 
-**Verdict: NO-GO** — Weight-based severe awareness is directionally correct but cannot replace correction. Recommend combining rolling severe_softmax (best sMAPE 19.10) with Phase2 correction pipeline.
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p33-spike-gated-uplift` |
+| Approach | Train separate uplift model for high-spike-risk hours; gate by spike probability |
+| Goal | Apply extra lift only where spike probability > threshold, reducing false lift on normal hours |
+| Status | `PLANNED` |
 
-### P3.1 Files Changed
+### Sprint Line C: Extra Prediction Signal (RT916 / TimesFM)
 
-| File | Change |
-|------|--------|
-| `scripts/run_rolling_30d_fusion.py` | +3 severe-aware modes, CLI args, quantile guard post-processing |
-| `tests/test_severe_aware_rolling.py` | NEW — 10 tests (severe penalty, anchor constraint, guard behavior) |
-| `docs/p3_execution_board.md` | Updated with P3.1 |
-| `docs/reports/P31_severe_aware_rolling_report.md` | NEW — full report |
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p33-extra-prediction-signal` |
+| Approach | Integrate RT916 or TimesFM predictions as additional model columns in multi-candidate pack |
+| Goal | Add signal diversity to reduce systematic underprediction on spike hours |
+| Status | `PLANNED` |
+
+### Sprint Line D: LightGBM Internal Sample Weighting
+
+| Field | Value |
+|-------|-------|
+| Branch | `agent/p33-lgbm-internal-weighting` |
+| Approach | Retrain LightGBM with sample weights that penalize spike-hour underestimates |
+| Goal | Improve base prediction quality on spike hours → less correction needed downstream |
+| Status | `PLANNED` |
+
+---
 
 ## Blockers
 
 | ID | Blocker | Status |
 |----|---------|--------|
-| B20 | Rolling fusion severe exceedance | OPEN — all modes produce severe >63; optimizer needs severe penalty |
+| ID | Blocker | Status |
+|----|---------|--------|
+| B20 | Rolling fusion severe exceedance | INACTIVE — all rolling approaches produce severe >63 |
 | B21 | SOTA model experiments | DEFERRED — LightGBM tuning scoped but not started |
-| B22 | P3.2 rolling + correction NO-GO | OPEN — P3.2 medium best at severe=73, still 10 above threshold |
+| B22 | P3.2 rolling + correction NO-GO | CLOSED — best at severe=73, above threshold |
 | B23 | P3.1 sMAPE re-evaluation | CLOSED — P3.1 rolling base sMAPE is 21.00 (not 19.10) |
+| B24 | **No approach beats Phase 2 simultaneously on sMAPE + severe** | **OPEN — P3.3 sprint objective** |
 
 ## Next Actions
 
-1. ✅ Run P3b rolling fusion with Phase 2 prediction pack
-2. ✅ Run P3d unified evaluation
-3. ❌ Rolling fusion NO-GO — severe underestimates exceed threshold
-4. ✅ P3.1 severe-aware rolling — 3 new modes, all NO-GO
-5. ✅ P3.2 rolling + correction — best combined result at sMAPE=20.74 / severe=73
-6. ❌ **P3 combined verdict: NO-GO** — No rolling or correction approach achieves both sMAPE ≤ 19.50 and severe ≤ 63
-7. **Recommendation**: Phase 2 lightgbm_anchor_90 + medium correction (sMAPE=20.86, severe=63) remains best known candidate
-8. SOTA LightGBM experiments (deferred to next cycle)
+1. ✅ PR #10 merged — tooling/leakage-fix/experiment framework in `tune-timemixer`
+2. ⏳ PR #11 — P3.1 severe-aware rolling (4 files only). Merge as tooling if clean, or close as NO-GO
+3. ✅ P3.2 rolling + correction evaluation complete (NO-GO)
+4. 🏃 **P3.3 Sprint A**: Run severe-constrained correction search
+5. 📋 **P3.3 Sprint B**: Scaffold spike-gated uplift model branch
+6. 📋 **P3.3 Sprint C**: Assess RT916/TimesFM checkpoint availability
+7. 📋 **P3.3 Sprint D**: Scaffold LightGBM internal weighting branch
+8. 🎯 **Decision gate**: If no P3.3 line produces DEPLOY GO, deploy Phase 2 champion as production candidate

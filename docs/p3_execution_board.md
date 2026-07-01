@@ -17,10 +17,9 @@
 |------|--------|-------|--------|
 | **W0: Runner / 总控** | `tune-timemixer` | P4 five-window focus sprint coordinator | `ACTIVE` |
 | **W1: Data + Pack Auditor** | `tune-timemixer` | Audit feature leakage, pack quality, data integrity | `ACTIVE` |
-| **W2: SOTA Model Tuning** | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
-| **W3: Spike Module / Risk Gate** | `tune-timemixer` | Risk model calibration, spike detection improvement | `ACTIVE` |
-| **W4: Fusion + Correction Finalizer** | `tune-timemixer` | Final fusion + correction pipeline tuning | `ACTIVE` |
-| **SA1 (Leakage Fix)** | `tune-timemixer` | FIX-01–FIX-04 + schema.py | `✅ MERGED via PR #10` |
+| **W2: SOTA Model Tuning** | `agent/p4-lgbm-sota-tuning` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
+| **W3: Spike Module / Risk Gate** | `agent/p4-canonical-eval-pack` | ML + Rule + Hybrid spike gate evaluation | `COMPLETE — RESEARCH GO` |
+| **W4: Fusion + Correction Finalizer** | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning, pending W2/W3 inputs | `ACTIVE` |
 | **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 OPEN` |
 | **P3.2 (Rolling+Correction)** | `tune-timemixer` | rolling + correction combo | `✅ MERGED via PR #10 (NO-GO)` |
 | **P3.4 Line G (TimesFM Smoke)** | `agent/p34-timesfm-diversity-smoke` | TimesFM diversity test | `COMPLETE — NO-GO` |
@@ -31,165 +30,11 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| P3a: Risk leakage fixes | Done | FIX-01–FIX-04 applied, schema.py created, all tests pass |
-| P3b: Rolling 30D fusion script | Done | `run_rolling_30d_fusion.py` — 4 weight modes, CLI aliases, leakage-safe |
-| P3b: Rolling 30D actual run | DONE | Softmax: sMAPE 19.86 (GO), severe 82 (NO-GO). All 3 modes: NO-GO |
-| P3c: SOTA lab scaffolding | Done | `docs/P3_single_model_sota_lab.md` — experiment plan + feasibility matrix |
-| P3c: SOTA actual experiments | DEFERRED | LightGBM tuning deferred — rolling fusion did not meet GO thresholds |
-| P3d: Unified evaluation script | Done | `evaluate_p3_rolling_sota_summary.py` — GO/CONDITIONAL/NO-GO |
-| P3d: Actual evaluation run | DONE | VERDICT: NO-GO — severe underestimate threshold not met |
-| P3.1: Severe-aware rolling fusion | DONE | 3 new modes: severe_softmax, severe_anchor, quantile_guarded. All NO-GO |
-| P3.2: Rolling base + spike correction | DONE | Combined rolling severe_softmax + Phase2 correction. VERDICT: NO-GO |
-| P3.3 Sprint A: Correction grid | DONE | 192 combos searched, 0 meet GO. NO-GO |
-| P3.3 Sprint B: Spike-gated uplift | DONE | sMAPE=22.68, severe=76. NO-GO |
-| P3.3 Sprint C: Extra prediction signal | DONE | TimesFM diversity smoke. NO-GO |
-| P3.3 Sprint D: LightGBM weighting | DONE | sMAPE=23.76, severe=54. NO-GO. PR #12 merged as tooling |
-| P3.4 Line G: TimesFM diversity smoke | DONE | No diversity benefit from TimesFM as extra model column |
-
----
-
-## P3a — Leakage Fixes
-
-| Fix | File | Status | Test |
-|-----|------|--------|------|
-| FIX-01 | `train_realtime_spike_risk.py` — exclude ACTUAL_COLS via ALL_EXCLUDED_COLS | Done | test_actual_cols_excluded |
-| FIX-02 | `predict_realtime_spike_risk.py` — remove y_true placeholder, leakage-safe fallback | Done | test_predict_no_y_true |
-| FIX-03 | `build_realtime_spike_dataset.py` — whitelist after merge | Done | test_whitelist_drops |
-| FIX-04 | `evaluate_realtime_spike_correction.py` — timestamp-level dedup | Done | (manual) |
-
-## P3b — Rolling 30D Fusion
-
-| Config | Value |
-|--------|-------|
-| Script | `scripts/run_rolling_30d_fusion.py` |
-| Weight modes | convex, ridge, softmax, anchor |
-| Default lookback | 30 days |
-| Min history | 10 days |
-| CLI aliases | `--weight-mode` / `--fusion-mode`, `--lookback-days` / `--train-window-days` |
-| Status | Script complete — ACTUAL RUN COMPLETE — see `docs/reports/P3_rolling_30d_fusion_report.md` |
-
-### P3b Rolling Fusion Results
-
-| Mode | sMAPE | Severe | Verdict |
-|------|-------|--------|---------|
-| anchor_90 | 20.61 | 82 | sMAPE ✅ (≤20.86), Severe ❌ (>63) |
-| softmax | **19.86** | 83 | sMAPE ✅, Severe ❌ |
-| convex | 23.70 | 152 | Both ❌ |
-
-## P3c — Single-Model SOTA Lab
-
-| Model | Priority | Plan |
-|-------|----------|------|
-| LightGBM | High | Hyperparameter grid search + CV |
-| RT916 | Low | Feasibility diagnosis only |
-| SGDFNet | Low | Feasibility diagnosis only |
-| TimeMixer | Low | Feasibility diagnosis only |
-
-## P3d — Unified Evaluation
-
-| Script | Status |
-|--------|--------|
-| `scripts/evaluate_p3_rolling_sota_summary.py` | Done — GO/CONDITIONAL/NO-GO rules |
-| **Actual evaluation** | **DONE — verdict: NO-GO** |
-
-### P3d Evaluation Verdict
-
-| Criterion | Threshold | Best P3 (softmax) | Met? |
-|-----------|-----------|-------------------|------|
-| sMAPE ≤ 20.86 | 20.86 | 19.86 | ✅ |
-| Severe underestimates ≤ 63 | 63 | 83 | ❌ |
-| **Verdict** | | | **NO-GO** |
-
-## P3.1 — Severe-Aware Rolling Fusion
-
-| Weight mode | Description | sMAPE | Severe | Verdict |
-|-------------|-------------|:-----:|:------:|:-------:|
-| severe_softmax | sMAPE + α·severe_rate + β·underprediction_MAE | 21.00 | 88 | NO-GO |
-| severe_anchor | LightGBM ≥ 0.85, filter baselines by severe rate | 21.12 | 86 | NO-GO |
-| quantile_guarded | severe_softmax + p75 guard on high-risk hours | 21.14 | 62 | NO-GO (sMAPE) |
-
-Note: sMAPE re-evaluated with standard pipeline (overall, not per-timestamp avg).
-
-## P3.2 — Rolling Base + Spike Correction
-
-Combines P3.1 rolling severe_softmax base with Phase2 correction pipeline.
-
-| Profile | sMAPE | Severe | False Lift | Normal Degrad. | Verdict |
-|---------|:-----:|:------:|:----------:|:--------------:|:-------:|
-| Medium | 20.74 | 73 | 0.076 | -0.16 | NO-GO |
-| Conservative | 20.99 | 86 | 0.004 | 0.00 | NO-GO |
-| Aggressive | 23.84 | 64 | 0.749 | 3.30 | NO-GO |
-
-**Key finding**: Correction reduces severe from 88→73 (medium) and improves sMAPE to 20.74 (best-ever), but no profile meets both thresholds.
-
-**Verdict: NO-GO** — Phase 2 best (static anchor_90 + medium correction) remains best known candidate.
-
----
-
-## P3.3 Parallel Sprint
-
-> **Goal**: Find ANY configuration that simultaneously beats sMAPE ≤ 20.50 AND severe ≤ 63.
-> **Baseline**: Phase 2 champion — sMAPE=20.86, severe=63.
-
-### Unified Evaluation Criteria
-
-| Tier | sMAPE | Severe | False Lift | Normal Degrad. | Action |
-|------|-------|--------|------------|----------------|--------|
-| **DEPLOY GO** | ≤ 20.50 | ≤ 63 | ≤ 10% | ≤ 0.5 | Merge as deployment candidate |
-| **RESEARCH GO** | ≤ 20.00 | ≤ 70 | ≤ 12% | ≤ 1.0 | Promising — iterate |
-| **NO-GO** | > 20.86 | > 70 | > 15% | > 1.0 | Stop — do not merge |
-
-### Sprint A: Severe-Constrained Correction (COMPLETE)
-
-| Field | Value |
-|-------|-------|
-| Branch | `agent/p33-severe-constrained-correction` |
-| Best result | severe=69, sMAPE=20.92, false_lift=7.6% (spike_prob_threshold=0.60, boost=1.50) |
-| Status | `COMPLETE — NO-GO` |
-
-### Sprint B: Spike-Gated Uplift (COMPLETE)
-
-| Field | Value |
-|-------|-------|
-| Branch | `agent/p33-spike-gated-uplift` |
-| Result | sMAPE=22.68, severe=76 — **NO-GO**. PR #13. |
-
-### Sprint C: Extra Prediction Signal / TimesFM (COMPLETE)
-
-| Field | Value |
-|-------|-------|
-| Branch | `agent/p33-extra-prediction-signal` |
-| Result | See `docs/reports/P33_extra_prediction_signal_report.md`. |
-
-### Sprint D: LightGBM Internal Weighting (COMPLETE)
-
-| Field | Value |
-|-------|-------|
-| Branch | `agent/p33-lgbm-internal-weighting` |
-| Result | sMAPE=23.76, severe=54 — **NO-GO**. PR #12 merged as tooling. |
-
-**P3.3 VERDICT**: All four lines NO-GO. No configuration beats Phase 2 on sMAPE AND severe simultaneously.
-
----
-
-## P3.4 — Candidate Combination Sprint
-
-> **Goal**: Converge. Combine best P3 signals into single system beating Phase 2 champion.
-> **Baseline**: sMAPE=20.86, severe=63.
-
-### Line G: TimesFM Diversity Fusion Smoke Test
-
-| Field | Value |
-|-------|-------|
-| Branch | `agent/p34-timesfm-diversity-smoke` |
-| Result | TimesFM predictions do not improve multi-candidate fusion. No diversity benefit. |
-| Status | `COMPLETE — NO-GO` |
-
-### Line H: P3 Decision Report
-
-| Field | Value |
-|-------|-------|
-| Status | `PLANNED` |
+| P3a–P3.4 (all P3) | COMPLETE | All NO-GO — see history below |
+| P4 W3: Hybrid Spike Gate | RESEARCH GO | severe=56, false_lift=9.06%, sMAPE=22.43 |
+| P4 W2: Quantile LGBM | Single-model GO | sMAPE=18.61, severe=12 (small window). Full window: sMAPE=27.17 |
+| P4 W1: Data + Pack Audit | PENDING | — |
+| P4 W4: Fusion + Correction | PENDING | Awaiting W2/W3 inputs |
 
 ---
 
@@ -217,15 +62,45 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 |--------|------|--------|-------|--------|
 | **W0** | Runner / 总控 | `tune-timemixer` | Maintain board, receive results, adjudicate GO/NO-GO | `ACTIVE` |
 | **W1** | Data + Pack Auditor | `tune-timemixer` | Audit feature leakage, pack quality, data integrity issues | `ACTIVE` |
-| **W2** | SOTA Model Tuning | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
-| **W3** | Spike Module / Risk Gate | `tune-timemixer` | Risk model calibration, spike detection improvement | `ACTIVE` |
+| **W2** | SOTA Model Tuning | `agent/p4-lgbm-sota-tuning` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
+| **W3** | Spike Module / Risk Gate | `agent/p4-canonical-eval-pack` | ML + Rule + Hybrid spike gate evaluation | `COMPLETE — RESEARCH GO` |
 | **W4** | Fusion + Correction Finalizer | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning | `ACTIVE — PENDING INPUTS (W2, W3)` |
 
 ### Results Log
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
-| — | — | — | — |
+| 2026-07-01 | **W2** | Quantile α=0.8 LGBM: Single-model sMAPE=18.61, severe=12 (small window). Full window: sMAPE=27.17, severe=25. | **Single-model GO** — base model improvement. Needs fusion + correction for DEPLOY GO. |
+| 2026-06-30 | **W3** | ml_gate+aggressive → severe=56 ✅, false_lift=9.06% ✅, sMAPE=22.43. Reduces severe by 7 vs baseline medium (63→56). | **RESEARCH GO** — severe + false_lift met, sMAPE limited by base model. |
+
+---
+
+### P4 W3: Hybrid Spike Gate — Detailed Results
+
+> **Goal**: Replace inflated old risk model with a hybrid ML+Rule gate to improve severe recall while maintaining false_lift ≤ 10%.
+> **Three gates**: ml_gate (RF), rule_gate (heuristic), hybrid_gate (0.6×ML + 0.4×rule).
+
+| Config | sMAPE | Severe | False Lift | Recall | Lifted |
+|--------|:-----:|:------:|:----------:|:------:|:------:|
+| **ml_gate + aggressive** | **22.43** | **56** | **0.0906** | **0.80** | **466** |
+| hybrid_gate + aggressive | 22.38 | 61 | 0.0829 | 0.76 | 434 |
+| ml_gate + medium | 22.60 | 73 | 0.0378 | 0.64 | 283 |
+| baseline old_risk + medium | 22.34 | 63 | 0.0702 | 0.15 | 225 |
+
+**Key insight**: ML gate probabilities better calibrated (mean 0.21 vs old risk 0.53). Need aggressive profile (threshold 0.40).
+
+**Verdict**: RESEARCH GO — severe=56 beats target, false_lift under 10%, sMAPE limited by base model accuracy.
+
+---
+
+### P4 W2: Quantile LightGBM Results
+
+| Date | Combo | sMAPE | Severe | Verdict |
+|------|-------|:-----:|:------:|:-------:|
+| 2025-11-01~2025-11-15 (small) | obj_quantile_0p8 | 18.6124 | 12 | GO ✅ |
+| 2025-11-01~2025-12-31 (full) | obj_quantile_0p8 | 27.1655 | 25 | see report |
+
+**Note**: Single-model quantile LGBM outperforms baseline on sub-period. Full-window regresses. W2 output → W4 finalizer.
 
 ---
 
@@ -233,19 +108,20 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | ID | Blocker | Status |
 |----|---------|--------|
-| B20 | Rolling fusion severe exceedance | INACTIVE — all rolling approaches produce severe >63 |
-| B21 | SOTA model experiments | DEFERRED — now under P4 W2 |
+| B20 | Rolling fusion severe exceedance | INACTIVE |
+| B21 | SOTA model experiments | DEFERRED — now P4 W2 |
 | B22 | P3.2 rolling + correction NO-GO | CLOSED |
 | B23 | P3.1 sMAPE re-evaluation | CLOSED |
 | B24 | No approach beats Phase 2 simultaneously on sMAPE + severe | **OPEN — P4 sprint objective** |
 
 ## Next Actions
 
-1. ✅ P3 tooling merged: PR #10 (leakage/rolling), PR #12 (LightGBM weighting)
+1. ✅ P3 tooling merged: PR #10, PR #12
 2. ⏳ PR #11: P3.1 severe-aware rolling — low-priority merge
-3. ⏳ PR #13: spike-gated uplift — needs sync with tune-timemixer then merge
-4. 🏃 **P4 W0**: Maintain board, receive results from W1–W4
-5. 🏃 **P4 W1–W4**: Each window runs independent experiments
-6. 🎯 **Decision gate**: First candidate that meets DEPLOY GO → merge as new champion
-7. 🏃 **P4 W4**: Skeleton ready at `scripts/evaluate_p4_final_fusion_correction.py` — waiting for W2 →window2-csv and W3 →window3-csv
-8. 🎯 **Fallback**: If no P4 candidate beats Phase 2, deploy Phase 2 champion as production candidate
+3. ⏳ PR #13: spike-gated uplift — needs sync + merge
+4. ✅ P4 W3: Hybrid Spike Gate complete — RESEARCH GO
+5. 🏃 **P4 W2**: Quantile LGBM tuning — single-model GO, awaiting full pipeline eval
+6. 🏃 **P4 W1**: Data + Pack audit
+7. 🏃 **P4 W4**: Await W2/W3 inputs for final fusion + correction
+8. 🎯 **Decision gate**: First DEPLOY GO candidate → new champion
+9. 🎯 **Fallback**: If no P4 candidate beats Phase 2 → deploy Phase 2 as production

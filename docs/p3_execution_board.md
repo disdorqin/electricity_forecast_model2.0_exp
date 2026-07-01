@@ -19,7 +19,7 @@
 | **W1: Data + Pack Auditor** | `tune-timemixer` | Audit feature leakage, pack quality, data integrity | `ACTIVE` |
 | **W2: SOTA Model Tuning** | `agent/p4-lgbm-sota-tuning` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
 | **W3: Spike Module / Risk Gate** | `agent/p4-canonical-eval-pack` | ML + Rule + Hybrid spike gate evaluation | `COMPLETE — RESEARCH GO` |
-| **W4: Fusion + Correction Finalizer** | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning, pending W2/W3 inputs | `ACTIVE` |
+| **W4: Fusion + Correction Finalizer** | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning | `COMPLETE — NO-GO` |
 | **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 OPEN` |
 | **P3.2 (Rolling+Correction)** | `tune-timemixer` | rolling + correction combo | `✅ MERGED via PR #10 (NO-GO)` |
 | **P3.4 Line G (TimesFM Smoke)** | `agent/p34-timesfm-diversity-smoke` | TimesFM diversity test | `COMPLETE — NO-GO` |
@@ -34,7 +34,7 @@
 | P4 W3: Hybrid Spike Gate | RESEARCH GO | severe=56, false_lift=9.06%, sMAPE=22.43 |
 | P4 W2: Quantile LGBM | Single-model GO | sMAPE=18.61, severe=12 (small window). Full window: sMAPE=27.17 |
 | P4 W1: Data + Pack Audit | PENDING | — |
-| P4 W4: Fusion + Correction | PENDING | Awaiting W2/W3 inputs |
+| P4 W4: Fusion + Correction | COMPLETE | Phase2 baseline: sMAPE=22.34 severe=63; W2+Phase2: sMAPE=26.23 severe=22; Phase2+W3: sMAPE=22.60 severe=73; W2+W3: sMAPE=26.14 severe=27 — all NO-GO |
 
 ---
 
@@ -72,6 +72,7 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 |------|--------|--------|---------|
 | 2026-07-01 | **W2** | Quantile α=0.8 LGBM: Single-model sMAPE=18.61, severe=12 (small window). Full window: sMAPE=27.17, severe=25. | **Single-model GO** — base model improvement. Needs fusion + correction for DEPLOY GO. |
 | 2026-06-30 | **W3** | ml_gate+aggressive → severe=56 ✅, false_lift=9.06% ✅, sMAPE=22.43. Reduces severe by 7 vs baseline medium (63→56). | **RESEARCH GO** — severe + false_lift met, sMAPE limited by base model. |
+| 2026-07-01 | **W4** | Phase2 baseline: sMAPE=22.34 severe=63; W2+Phase2: sMAPE=26.23 severe=22; Phase2+W3: sMAPE=22.60 severe=73; W2+W3: sMAPE=26.14 severe=27 | **NO-GO** — all combos fail sMAPE threshold |
 
 ---
 
@@ -122,6 +123,6 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 4. ✅ P4 W3: Hybrid Spike Gate complete — RESEARCH GO
 5. 🏃 **P4 W2**: Quantile LGBM tuning — single-model GO, awaiting full pipeline eval
 6. 🏃 **P4 W1**: Data + Pack audit
-7. 🏃 **P4 W4**: Await W2/W3 inputs for final fusion + correction
+7. ✅ **P4 W4**: Fusion + Correction Finalizer complete — all NO-GO, Phase2 champion remains best
 8. 🎯 **Decision gate**: First DEPLOY GO candidate → new champion
-9. 🎯 **Fallback**: If no P4 candidate beats Phase 2 → deploy Phase 2 as production
+9. 🎯 **Fallback**: No P4 candidate beats Phase 2 (current finding) → deploy Phase 2 as production

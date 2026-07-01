@@ -241,6 +241,37 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
+| 2026-07-01 | W2 | Quantile α=0.8 LGBM: Single-model sMAPE=18.61, severe=12 (small window) | Single-model GO |
+| 2026-06-30 | W3 | ml_gate+aggressive → severe=56, false_lift=9.06%, sMAPE=22.43 | RESEARCH GO |
+
+### P4 DEPLOY GO
+
+<<<<<<< HEAD
+| Criteria | Threshold |
+|----------|-----------|
+| sMAPE | ≤ 20.50 |
+| severe | ≤ 63 |
+| false_lift | ≤ 10% |
+| normal_degradation | ≤ 0.5 |
+
+### P4 PAPER GO
+
+Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND has clear technical novelty.
+
+### Window Assignments
+
+| Window | Role | Branch | Scope | Status |
+|--------|------|--------|-------|--------|
+| **W0** | Runner / 总控 | `tune-timemixer` | Maintain board, receive results, adjudicate GO/NO-GO | `ACTIVE` |
+| **W1** | Data + Pack Auditor | `tune-timemixer` | Audit feature leakage, pack quality, data integrity issues | `ACTIVE` |
+| **W2** | SOTA Model Tuning | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
+| **W3** | Spike Module / Risk Gate | `agent/p4-canonical-eval-pack` | ML + Rule + Hybrid spike gate evaluation | `COMPLETE — RESEARCH GO` |
+| **W4** | Fusion + Correction Finalizer | `tune-timemixer` | Final fusion + correction pipeline tuning | `ACTIVE` |
+
+### Results Log
+
+| Date | Window | Result | Verdict |
+|------|--------|--------|---------|
 | 2026-07-01 | **W2** | **Quantile α=0.8 LGBM**: Single-model sMAPE=18.61, severe=12 on small window. GO ✅ (target: ≤22.02/80). Full window: sMAPE=27.17, severe=25. | **Single-model GO** 🔵 — base model improvement. Strong GO needs fusion + correction. |
 | 2026-06-30 | **W3** | **P4 Hybrid Spike Gate**: ml_gate+aggressive → severe=56 ✅, false_lift=9.06% ✅, sMAPE=22.43 ❌* (*base sMAPE=22.68 — target 20.5 unachievable on canonical pack). Reduces severe by 7 vs baseline medium (63→56). | **RESEARCH GO** — severe + false_lift targets met, sMAPE target relaxed (base model constraint). Delivered: `scripts/evaluate_p4_hybrid_spike_gate.py`, `docs/reports/P4_hybrid_spike_gate_report.md`. |
 
@@ -268,3 +299,12 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 |------|-------|:-----:|:------:|:-------:|
 | 2025-11-01~2025-11-15 (small) | obj_quantile_0p8 | 18.6124 | 12 | GO ✅ |
 | 2025-11-01~2025-12-31 (full) | obj_quantile_0p8 | 27.1655 | 25 | see report |
+=======
+1. ✅ P3 tooling merged: PR #10 (leakage/rolling), PR #12 (LightGBM weighting)
+2. ⏳ PR #11: P3.1 severe-aware rolling — low-priority merge
+3. ⏳ PR #13: spike-gated uplift — needs sync with tune-timemixer then merge
+4. 🏃 **P4 W0**: Maintain board, receive results from W1–W4
+5. 🏃 **P4 W1–W4**: Each window runs independent experiments
+6. 🎯 **Decision gate**: First candidate that meets DEPLOY GO → merge as new champion
+7. 🎯 **Fallback**: If no P4 candidate beats Phase 2, deploy Phase 2 champion as production candidate
+>>>>>>> origin/tune-timemixer

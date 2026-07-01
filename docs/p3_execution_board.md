@@ -261,22 +261,9 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 ---
 
-## Blockers
+### W2 Results
 
-| ID | Blocker | Status |
-|----|---------|--------|
-| B20 | Rolling fusion severe exceedance | INACTIVE — all rolling approaches produce severe >63 |
-| B21 | SOTA model experiments | DEFERRED — now under P4 W2 |
-| B22 | P3.2 rolling + correction NO-GO | CLOSED |
-| B23 | P3.1 sMAPE re-evaluation | CLOSED |
-| B24 | No approach beats Phase 2 simultaneously on sMAPE + severe | **OPEN — P4 sprint objective** |
-
-## Next Actions
-
-1. ✅ P3 tooling merged: PR #10 (leakage/rolling), PR #12 (LightGBM weighting)
-2. ⏳ PR #11: P3.1 severe-aware rolling — low-priority merge
-3. ⏳ PR #13: spike-gated uplift — needs sync with tune-timemixer then merge
-4. 🏃 **P4 W0**: Maintain board, receive results from W1–W4
-5. 🏃 **P4 W1–W4**: Each window runs independent experiments
-6. 🎯 **Decision gate**: First candidate that meets DEPLOY GO → merge as new champion
-7. 🎯 **Fallback**: If no P4 candidate beats Phase 2, deploy Phase 2 champion as production candidate
+| Date | Combo | sMAPE | Severe | Verdict |
+|------|-------|:-----:|:------:|:-------:|
+| 2025-11-01~2025-11-15 (small) | obj_quantile_0p8 | 18.6124 | 12 | GO ✅ |
+| 2025-11-01~2025-12-31 (full) | obj_quantile_0p8 | 27.1655 | 25 | see report |

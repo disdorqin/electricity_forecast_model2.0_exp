@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Branch:** agent/p4-fusion-correction-finalizer
-**Status:** COMPLETE — NO-GO
+**Status:** COMPLETE — ALL NO-GO
 
 ---
 
@@ -10,12 +10,14 @@
 
 Combine Window 2 (best LightGBM quantile candidate) and Window 3 (best ML gate risk) with Phase2 fusion + correction to achieve DEPLOY GO.
 
-| Criterion | DEPLOY GO Threshold | Phase2 Champion |
-|-----------|--------------------|------------------|
-| sMAPE | <= 20.50 | 20.86 |
-| Severe underestimates | <= 63 | 63 |
-| False lift rate | <= 10% | — |
-| Normal hours degradation | <= 0.5 | — |
+| Criterion | DEPLOY GO Threshold | Phase2 Champion (Full) | Phase2 Champion (Overlap) |
+|-----------|--------------------|------------------------|---------------------------|
+| sMAPE floor50 | <= 20.50 | 20.8675 | 19.11 |
+| Severe underestimates | <= 63 | 63 | 18 |
+| False lift rate | <= 10% | 6.64% | 5.27% |
+| Normal hours degradation | <= 0.5 | -0.19 | -0.20 |
+
+**Note on sMAPE formula**: Uses canonical floor50 sMAPE: `max(|x|, 50)` on both y_true and y_pred in denominator, with floored values in numerator. Matches `canonical_metrics_baseline.json`.
 
 ## Inputs
 
@@ -26,51 +28,78 @@ Combine Window 2 (best LightGBM quantile candidate) and Window 3 (best ML gate r
 | Phase2 Risk | Canonical risk predictions | `reports/local/p4_canonical/canonical_risk_predictions.csv` |
 | W3 Risk | ML gate risk predictions | `reports/local/p4_hybrid_gate/ml_gate/risk_predictions_gate.csv` |
 
-Note: W2 covers 62 days (2025-11-01 to 2026-01-01, 1464 timestamps). Full period is 120 days (2025-11-01 to 2026-02-28, 2879 timestamps).
+W2 covers 61 days (2025-11-01 ~ 2025-12-31, 1464 timestamps). Full period is 120 days (2025-11-01 ~ 2026-02-28, 2879 timestamps).
 
-## Combinations Evaluated
+## Combos
 
-| # | Combo | Base | Risk | Period | sMAPE | Severe | False Lift | Normal Degrad | Verdict |
-|---|-------|------|------|--------|:-----:|:------:|:----------:|:-------------:|:-------:|
-| A | phase2_baseline | Canonical `base_fused_pred` | Phase2 | full | **22.34** | **63** | 0.08 | -0.20 | NO-GO |
-| B | w2_phase2_risk | W2 anchor fusion (0.9*W2 + 0.1*baselines) | Phase2 | W2 | **26.23** | **22** | 0.06 | 0.08 | NO-GO |
-| C | phase2_w3_risk | Canonical `base_fused_pred` | W3 ML gate | full | **22.60** | **73** | 0.10 | -0.07 | NO-GO |
-| D | w2_w3_risk | W2 anchor fusion | W3 ML gate | W2 | **26.14** | **27** | 0.07 | 0.05 | NO-GO |
+| # | Combo | Base | Risk | Window |
+|---|-------|------|------|--------|
+| A | Phase2 canonical baseline | Canonical `base_fused_pred` | Phase2 (via `final_pred_reference`) | Full + Overlap |
+| B | W2 + Phase2 corr | Replace lightgbm → W2 quantile, recompute anchor_90 | Phase2 canonical | Overlap only |
+| C | Phase2 + W3 gate | Canonical `base_fused_pred` | W3 ML gate | Full + Overlap |
+| D | W2 + W3 gate | Replace lightgbm → W2 quantile, recompute anchor_90 | W3 ML gate | Overlap only |
 
-Reference: Phase2 champion sMAPE=20.86, severe=63.
+**Key fix**: Combo A uses `final_pred_reference` directly from canonical pack (no re-correction). sMAPE uses the exact canonical floor50 formula.
 
-## Analysis
+## Full-Window Results (2025-11-01 ~ 2026-02-28, 2879 timestamps)
 
-### Finding 1: Phase2 baseline re-evaluates at sMAPE=22.34 (vs 20.86 champion)
+| Combo | sMAPE | Base sMAPE | Severe | False Lift | Normal Degrad | Verdict |
+|-------|:-----:|:----------:|:------:|:----------:|:-------------:|:-------:|
+| **A — Phase2 baseline** | **20.87** | **21.21** | **63** | **0.07** | **-0.19** | **NO-GO** |
+| C — Phase2 + W3 gate | 21.13 | 21.21 | 73 | 0.10 | -0.07 | NO-GO |
 
-The canonical pack's `base_fused_pred` uses the same Phase2 anchor_90 fusion formula (0.9*lightgbm + 0.1*mean of baselines), but the corrected sMAPE measures at 22.34. This suggests the Phase2 champion's 20.86 was from a different evaluation setup (e.g., different risk file, different dedup, or a slightly different date range). On this canonical pack, the correction-only improvement is marginal (22.68 base -> 22.34 corrected = -0.34 sMAPE improvement).
+Phase2 champion reference: sMAPE=20.8675, severe=63, false_lift=0.0664, normal_degrad=-0.1929.
 
-### Finding 2: W2 quantile 0.8 degrades sMAPE severely (26.23 vs 20.86)
+**A matches champion exactly ✅** — sanity check passed.
 
-The LightGBM quantile alpha=0.8 model trades sMAPE for severe reduction. Severe drops from 63 to 22 (good), but sMAPE balloons to 26.23 (bad). The quantile model systematically over-predicts, causing high error across all hours. This tradeoff is unacceptable for DEPLOY GO.
+C shows slight degradation: sMAPE +0.26, severe +10 vs champion. W3 ML gate risk does not improve over Phase2 risk on the full window.
 
-### Finding 3: W3 ML gate risk does not improve over Phase2 risk
+## Overlap-Window Results (2025-11-01 ~ 2025-12-31, 1464 timestamps)
 
-Phase2 base + W3 risk: sMAPE=22.60, severe=73 (worse than Phase2 risk: 22.34, 63). The ML gate's `high_spike_prob` values do not provide better correction targeting than the Phase2 risk model. Both metrics degrade across the board.
+| Combo | sMAPE | Base sMAPE | Severe | False Lift | Normal Degrad | Verdict |
+|-------|:-----:|:----------:|:------:|:----------:|:-------------:|:-------:|
+| **A — Phase2 baseline** | **19.11** | **19.37** | **18** | **0.05** | **-0.20** | **DEPLOY GO*** |
+| B — W2 + Phase2 corr | 24.84 | 24.73 | 21 | 0.05 | 0.18 | NO-GO |
+| C — Phase2 + W3 gate | 19.33 | 19.37 | 19 | 0.07 | -0.02 | DEPLOY GO* |
+| D — W2 + W3 gate | 24.77 | 24.73 | 26 | 0.07 | 0.06 | NO-GO |
 
-### Finding 4: W2 + W3 combined is the worst of both worlds
+**DEPLOY GO* = DEPLOY GO on overlap-window only.** Per protocol, DEPLOY GO is only assessed on full-window. Overlap-window verdicts are directional.
 
-sMAPE=26.14, severe=27. The quantile model dominates the base_fused_pred (high sMAPE) and W3 risk doesn't help correct effectively.
+### Analysis
+
+**Phase2 baseline (A) on overlap**: sMAPE=19.11, severe=18. The Nov-Dec period has inherently lower error than the full window (which includes Jan-Feb winter peak). This is the fair baseline for B/C/D comparison on overlap.
+
+**W2 quantile (B, D)**: sMAPE ~24.8 vs A_overlap 19.11 — **severe degradation of ~5.7 sMAPE points**. The quantile alpha=0.8 model systematically over-predicts, matching the standalone W2 evaluation (full W2 run: sMAPE=27.17). The quantile approach is not viable for production fusion.
+
+**W3 ML gate (C)**: sMAPE=19.33, severe=19 vs A 19.11, 18 — slightly worse on both metrics. On the overlap window, the W3 gate provides no improvement over Phase2 risk. On the full window, C is strictly worse (21.13/73 vs 20.87/63).
+
+**W2 + W3 combined (D)**: Picks up the worst of both — high sMAPE from W2 quantile (24.77) with no compensating benefit from W3 gate.
 
 ## Verdict
 
-**NO-GO** — No combination meets DEPLOY GO. All 4 combos fail on sMAPE (none < 20.50).
+**NO-GO** — No combination meets DEPLOY GO thresholds on the full-window.
 
-| Combo | sMAPE <= 20.50 | Severe <= 63 | False lift <= 10% | Normal degrad <= 0.5 |
-|-------|:--------------:|:------------:|:-----------------:|:--------------------:|
-| A | ❌ 22.34 | ✅ 63 | ✅ 0.08 | ✅ -0.20 |
-| B | ❌ 26.23 | ✅ 22 | ✅ 0.06 | ✅ 0.08 |
-| C | ❌ 22.60 | ❌ 73 | ✅ 0.10 | ✅ -0.07 |
-| D | ❌ 26.14 | ✅ 27 | ✅ 0.07 | ✅ 0.05 |
+| Combo | sMAPE <= 20.50 | Severe <= 63 | False lift <= 10% | Normal degrad <= 0.5 | Overall |
+|-------|:--------------:|:------------:|:-----------------:|:--------------------:|:-------:|
+| A | ❌ 20.87 | ✅ 63 | ✅ 6.6% | ✅ -0.19 | **NO-GO** |
+| B | ❌ 24.84 | ✅ 21 | ✅ 5.3% | ✅ 0.18 | **NO-GO** |
+| C | ❌ 21.13 | ❌ 73 | ✅ 10.1% | ✅ -0.07 | **NO-GO** |
+| D | ❌ 24.77 | ✅ 26 | ✅ 7.0% | ✅ 0.06 | **NO-GO** |
 
 ## Recommendations
 
-1. **Phase 2 champion remains best candidate** — Phase2 anchor_90 + medium correction (normal mode) is still the best known configuration.
-2. **W2 quantile model unsuitable** — The sMAPE cost of quantile-based predictions is too high. If severe reduction is needed, it must come from correction, not from biased base predictions.
-3. **W3 ML gate needs improvement** — Risk predictions that degrade both sMAPE and severe vs Phase2 risk need retraining or different features.
-4. **Deploy Phase2 champion as production candidate** — Since no P4 candidate beats Phase2, fall back to Phase2 champion.
+1. **Phase2 champion remains best candidate** — sMAPE=20.87, severe=63. No P4 combo beats it.
+2. **W2 quantile model not suitable for fusion** — The sMAPE cost (~5.7 points on overlap) is too high. Severe reduction (18→21) does not compensate. Quantile approach abandoned for fusion.
+3. **W3 ML gate needs retraining** — No improvement over Phase2 risk on either full or overlap window. If pursuing further, need to investigate feature set or training target mismatch.
+4. **Phase2 champion should be deployment candidate** — Since no P4 candidate exceeds it, phase2 anchor_90 + medium correction (normal mode) remains production choice.
+
+## Comparison Summary
+
+| Aspect | Full-Window | Overlap-Window |
+|--------|:-----------:|:--------------:|
+| A — Phase2 baseline | 20.87 / 63 | 19.11 / 18 |
+| B — W2 + Phase2 corr | — | 24.84 / 21 |
+| C — Phase2 + W3 gate | 21.13 / 73 | 19.33 / 19 |
+| D — W2 + W3 gate | — | 24.77 / 26 |
+
+Format: sMAPE / severe. Full-window: 120 days. Overlap-window: 61 days (W2 coverage).

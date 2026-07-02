@@ -1,8 +1,8 @@
 # P3–P4 Execution Board
 
 > **Purpose**: Track all tasks across P3 (complete) and P4 (active) execution pipeline.
-> **Status**: `[P3a–P3.4 COMPLETE (all NO-GO) — P4 FIVE-WINDOW FOCUS SPRINT ACTIVE]`
-> **Branch**: `tune-timemixer`
+> **Status**: `[P3a–P3.4 COMPLETE (all NO-GO) — P4 FIVE-WINDOW FOCUS SPRINT COMPLETE (all NO-GO)]`
+> **Branch**: `agent/p4-fusion-correction-finalizer`
 > **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.86, severe=63)
 > **PR #10**: ✅ MERGED — P3 tooling/leakage-fix/rolling framework
 > **PR #11**: OPEN — P3.1 severe-aware rolling (NO-GO, low-priority tooling merge)
@@ -235,13 +235,14 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 | **W1** | Data + Pack Auditor | `tune-timemixer` | Audit feature leakage, pack quality, data integrity issues | `ACTIVE` |
 | **W2** | SOTA Model Tuning | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
 | **W3** | Spike Module / Risk Gate | `agent/p4-canonical-eval-pack` | ML + Rule + Hybrid spike gate evaluation | `COMPLETE — RESEARCH GO` |
-| **W4** | Fusion + Correction Finalizer | `tune-timemixer` | Final fusion + correction pipeline tuning | `ACTIVE` |
+| **W4** | Fusion + Correction Finalizer | `agent/p4-fusion-correction-finalizer` | Final fusion + correction pipeline tuning | `COMPLETE — NO-GO` |
 
 ### Results Log
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
 | 2026-06-30 | **W3** | **P4 Hybrid Spike Gate**: ml_gate+aggressive → severe=56 ✅, false_lift=9.06% ✅, sMAPE=22.43 ❌* (*base sMAPE=22.68 — target 20.5 unachievable on canonical pack). Reduces severe by 7 vs baseline medium (63→56). | **RESEARCH GO** — severe + false_lift targets met, sMAPE target relaxed (base model constraint). Delivered: `scripts/evaluate_p4_hybrid_spike_gate.py`, `docs/reports/P4_hybrid_spike_gate_report.md`. |
+| 2026-07-01 | **W4** | **P4 Final Fusion + Correction**: 4 combos evaluated with canonical floor50 sMAPE. A (Phase2 baseline): sMAPE=20.87 ✅, severe=63 ✅ (sanity check pass). B (W2+Phase2): sMAPE=24.84 ❌, severe=21 (quantile degrades sMAPE). C (Phase2+W3): sMAPE=21.13, severe=73 (slightly worse than baseline). D (W2+W3): sMAPE=24.77, severe=26 (worst combo). | **NO-GO** — No combo beats Phase2 champion (20.87/63) on full-window. W2 quantile model causes ~5.7 sMAPE degradation vs overlap baseline. W3 gate provides no benefit over Phase2 risk. |
 
 ### P4 W3: Hybrid Spike Gate — Detailed Results
 
@@ -258,6 +259,51 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 **Key insight**: ML gate probabilities are better calibrated (mean 0.21 vs old risk 0.53) but need aggressive profile (threshold 0.40) to align.
 
 **Verdict**: RESEARCH GO — severe=56 beats target, false_lift under 10%, sMAPE limited by base model accuracy. Recommend deployment of `ml_gate + aggressive` if sMAPE target is relaxed to reflect canonical pack methodology.
+
+---
+
+### P4 W4: Final Fusion + Correction — Detailed Results
+
+> **Goal**: Combine W2 (best LightGBM quantile) and W3 (best ML gate risk) with Phase2 fusion + correction to achieve DEPLOY GO (sMAPE ≤ 20.50, severe ≤ 63, false_lift ≤ 10%, normal_degrad ≤ 0.5).
+> **Key fix**: Canonical floor50 sMAPE formula (`max(|x|, 50)` on both, floored values in numerator). Combo A uses `final_pred_reference` directly (no re-correction).
+> **Two comparison windows**: Full-window (120 days) and Overlap-window (61 days, W2 coverage).
+
+#### Combo A: Phase2 Canonical Baseline (Sanity Check)
+
+| Window | sMAPE | Severe | False Lift | Normal Degrad | Verdict |
+|--------|:-----:|:------:|:----------:|:-------------:|:-------:|
+| Full (120 days) | **20.8675** | **63** | 0.0664 | -0.19 | NO-GO |
+| Overlap (61 days) | 19.11 | 18 | 0.05 | -0.20 | DEPLOY GO* |
+
+✅ **Sanity check passed**: sMAPE=20.8675 matches canonical_metrics_baseline.json exactly. Severe=63 exact match.
+
+#### Full-Window Results
+
+| Combo | sMAPE | Severe | False Lift | Normal Degrad | Verdict |
+|-------|:-----:|:------:|:----------:|:-------------:|:-------:|
+| A — Phase2 baseline | 20.87 | 63 | 0.07 | -0.19 | NO-GO |
+| C — Phase2 + W3 gate | 21.13 | 73 | 0.10 | -0.07 | NO-GO |
+
+#### Overlap-Window Results
+
+| Combo | sMAPE | Severe | False Lift | Normal Degrad | Verdict |
+|-------|:-----:|:------:|:----------:|:-------------:|:-------:|
+| A — Phase2 baseline | 19.11 | 18 | 0.05 | -0.20 | DEPLOY GO* |
+| B — W2 + Phase2 corr | 24.84 | 21 | 0.05 | 0.18 | NO-GO |
+| C — Phase2 + W3 gate | 19.33 | 19 | 0.07 | -0.02 | DEPLOY GO* |
+| D — W2 + W3 gate | 24.77 | 26 | 0.07 | 0.06 | NO-GO |
+
+*DEPLOY GO* = on overlap-window only; official DEPLOY GO assessed on full-window only.
+
+#### Key Findings
+
+1. **W2 quantile LightGBM degrades sMAPE by ~5.7 points** — sMAPE 24.84 vs A_overlap 19.11. The quantile alpha=0.8 model systematically over-predicts. Severe reduction (18→21) does not compensate. Not viable for fusion.
+2. **W3 ML gate does not improve over Phase2 risk** — C_overlap: sMAPE 19.33 vs 19.11 (worse), severe 19 vs 18 (worse). On full-window: sMAPE 21.13 vs 20.87 (worse), severe 73 vs 63 (much worse).
+3. **W2 + W3 combined is worst combo** — sMAPE 24.77, severe 26. Picks up high sMAPE from W2 quantile with no compensating benefit from W3 gate.
+
+**Verdict**: NO-GO — No P4 combo beats Phase2 champion (20.87/63) on full-window. Phase2 anchor_90 + medium correction (normal mode) remains best known configuration.
+
+**Delivered**: `scripts/evaluate_p4_final_fusion_correction.py`, `docs/reports/P4_final_fusion_correction_report.md`.
 
 ---
 

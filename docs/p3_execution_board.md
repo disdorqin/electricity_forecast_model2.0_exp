@@ -264,7 +264,27 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 ---
 
-### W2 Results
+### P5 W3: Deep/TS Model Zoo
+
+> **Goal**: Find deep/time-series models that provide diverse predictions vs LightGBM (correlation < 0.8) and optionally beat strong GO (sMAPE ≤ 22.02).
+> **Candidate models**: TimesFM, PatchTST, iTransformer, TSMixer, N-HiTS, TimeMixer++, RT916 selective, SGDFNet.
+
+| Model | Status | sMAPE | Severe | Corr vs LGBM | Runtime |
+|-------|:------:|:-----:|:------:|:------------:|:-------:|
+| **TimesFM** 🟢 | **RUN** | **35.59** | **286** | **-0.027** | **145s** |
+| TimeMixer++ 🟡 | cached (36d only) | — | — | — | — |
+| RT916 🟡 | feasibility | — | — | — | — |
+| SGDFNet 🟡 | feasibility | — | — | — | — |
+| PatchTST 🔴 | not installed | — | — | — | — |
+| iTransformer 🔴 | not installed | — | — | — | — |
+| TSMixer 🔴 | not installed | — | — | — | — |
+| N-HiTS 🔴 | not installed | — | — | — | — |
+
+**Key finding**: TimesFM is the only production-ready deep model. It provides near-zero correlation with LightGBM (-0.027), making it ideal for ensemble fusion despite weaker standalone accuracy.
+
+**Verdict**: **Diversity GO** — correlation < 0.8 threshold met. Standalone sMAPE (35.59) and severe (286) fail Strong GO. Recommend adding TimesFM as a 5th candidate column in the multi-candidate pack.
+
+See `docs/reports/P5_deep_ts_model_zoo_report.md` for full analysis.
 
 | Date | Combo | sMAPE | Severe | Verdict |
 |------|-------|:-----:|:------:|:-------:|
@@ -302,7 +322,7 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | Window | Role | Scope | Status |
 |--------|------|-------|--------|
-| **W1** | Canonical + Dataset Builder | Build eval pack, lock date range, audit features, reproduce Phase 2 baseline | `COMPLETE — PR #14 MERGED` |
+| **W1** | Canonical + Dataset Builder | Build eval pack, lock date range, audit features, reproduce Phase 2 baseline, create P5 model-zoo dataset | `COMPLETE — PR #14 MERGED + P5 Dataset` |
 | **W2** | Tabular Model Zoo | LightGBM variants, quantile regression, hyperparameter grid | `ACTIVE — PR #15 (has conflict)` |
 | **W3** | Deep/TS Model Zoo | RT916, TimesFM, SGDFNet, TimeMixer — evaluate on canonical pack | `ACTIVE` |
 | **W4** | Fusion + Correction Finalizer | Combine best from W2+W3 + Phase2 candidates → fused + corrected output. **Must pass baseline sanity check first.** | `ACTIVE — PENDING INPUTS` |
@@ -311,7 +331,8 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
-| — | — | — | — |
+| 2026-07-02 | W1 | P5 Model-Zoo Dataset: 2880 timestamps, 28 features, 4 model predictions, no leakage. Train/Valid/Test within 2025-11-01~2026-02-28. Prediction schema v1.0 ready. | ✅ COMPLETE — READY |
+| 2026-07-02 | **W3** | **P5 Deep/TS Model Zoo**: TimesFM full-window inference (145s). Correlation with LightGBM = **-0.027** (Diversity GO ✅). Standalone sMAPE=35.59 (Strong GO ❌). All other models no-go (no checkpoints/packages). | **Diversity GO** — corr < 0.8 met. Not a replacement, valuable for fusion. |
 
 ---
 
@@ -337,3 +358,14 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 9. 🏃 **P5 W4**: Final fusion — await W2+W3 inputs, must pass baseline sanity check first
 10. 🎯 **First P5 candidate meeting DEPLOY GO** → new champion
 11. 🎯 **Fallback**: Deploy Phase 2 as production
+
+---
+
+## P5 — Tabular Model Zoo
+
+> 
+
+Generated: 2026-07-02 12:25:50
+
+| Model/Profile | sMAPE | Severe | 9-16 sMAPE | Runtime |
+|--------------|:-----:|:------:|:----------:|:------:|

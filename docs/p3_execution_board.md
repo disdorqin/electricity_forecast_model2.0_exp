@@ -69,7 +69,8 @@ Must produce daily outputs: coverage, missing models, feature drift, prediction 
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
-| — | — | — | — |
+| 2026-07-02 | **W2** | **Monitoring Module**: `scripts/monitor_prediction_health.py` — 12 checks (coverage, missing models, duplicates, feature missing, prediction drift, feature drift, sMAPE/MAE, severe, high-spike, negative-price, abnormal lift, alert level). 21/21 tests pass. Outputs: `daily_health.json`, `daily_health.md`, `alerts.json`. | ✅ COMPLETE — 21 tests pass |
+| 2026-07-02 | **W3** | **Negative Price + Residual Module**: `extreme/negative_price/` (8 files) — schema, labels, features, risk_model, residual_correction, guardrail, apply_negative_correction. `scripts/evaluate_p5_negative_residual_module.py`. 26/26 tests pass. Mutual exclusion with high_spike guaranteed. | ✅ COMPLETE — 26 tests pass |
 
 ---
 
@@ -94,7 +95,7 @@ Must produce daily outputs: coverage, missing models, feature drift, prediction 
 7. ⏳ PR #11: P3.1 severe-aware rolling — low-priority tooling
 8. 🏃 **P5R W1**: Tune TimeMixer / RT916 / SGDFNet on canonical pack
 9. 🏃 **P5R W2**: Build monitoring module
-10. 🏃 **P5R W3**: Build negative price + residual correction
+10. ✅ **P5R W3**: Build negative price + residual correction — COMPLETE
 11. 🏃 **P5R W4**: Integrate once W1/W2/W3 are ready
 12. 🎯 **First P5R fusion candidate meeting DEPLOY GO** → new champion
 13. 🎯 **Fallback**: Deploy Phase 2 as production

@@ -80,3 +80,4 @@ test_*.py
 !tests/test_rolling_30d_fusion.py
 !tests/test_realtime_spike_no_leakage.py
 !tests/test_p4_canonical_eval_pack.py
+!tests/test_p5_model_zoo_dataset.py

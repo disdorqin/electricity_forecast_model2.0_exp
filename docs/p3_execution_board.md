@@ -302,7 +302,7 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | Window | Role | Scope | Status |
 |--------|------|-------|--------|
-| **W1** | Canonical + Dataset Builder | Build eval pack, lock date range, audit features, reproduce Phase 2 baseline | `COMPLETE — PR #14 MERGED` |
+| **W1** | Canonical + Dataset Builder | Build eval pack, lock date range, audit features, reproduce Phase 2 baseline, create P5 model-zoo dataset | `COMPLETE — PR #14 MERGED + P5 Dataset` |
 | **W2** | Tabular Model Zoo | LightGBM variants, quantile regression, hyperparameter grid | `ACTIVE — PR #15 (has conflict)` |
 | **W3** | Deep/TS Model Zoo | RT916, TimesFM, SGDFNet, TimeMixer — evaluate on canonical pack | `ACTIVE` |
 | **W4** | Fusion + Correction Finalizer | Combine best from W2+W3 + Phase2 candidates → fused + corrected output. **Must pass baseline sanity check first.** | `ACTIVE — PENDING INPUTS` |
@@ -311,7 +311,7 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 
 | Date | Window | Result | Verdict |
 |------|--------|--------|---------|
-| — | — | — | — |
+| 2026-07-02 | W1 | P5 Model-Zoo Dataset: 2880 timestamps, 28 features, 4 model predictions, no leakage. Train/Valid/Test within 2025-11-01~2026-02-28. Prediction schema v1.0 ready. | ✅ COMPLETE — READY |
 
 ---
 
@@ -337,3 +337,14 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 9. 🏃 **P5 W4**: Final fusion — await W2+W3 inputs, must pass baseline sanity check first
 10. 🎯 **First P5 candidate meeting DEPLOY GO** → new champion
 11. 🎯 **Fallback**: Deploy Phase 2 as production
+
+---
+
+## P5 — Tabular Model Zoo
+
+> 
+
+Generated: 2026-07-02 12:25:50
+
+| Model/Profile | sMAPE | Severe | 9-16 sMAPE | Runtime |
+|--------------|:-----:|:------:|:----------:|:------:|

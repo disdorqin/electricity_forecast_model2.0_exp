@@ -1,13 +1,15 @@
-# P3–P4 Execution Board
+# P3–P5 Execution Board
 
-> **Purpose**: Track all tasks across P3 (complete) and P4 (active) execution pipeline.
-> **Status**: `[P3a–P3.4 COMPLETE (all NO-GO) — P4 FIVE-WINDOW FOCUS SPRINT ACTIVE]`
+> **Purpose**: Track all tasks across P3 (complete), P4 (complete), and P5 (active) execution pipeline.
+> **Status**: `[P3a–P4 COMPLETE (all NO-GO) — P5 MODEL ZOO + FINAL FUSION BIG RUN ACTIVE]`
 > **Branch**: `tune-timemixer`
-> **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.86, severe=63)
+> **Deployment champion**: Phase 2 lightgbm_anchor_90 + medium + normal (sMAPE=20.8675, severe=63)
 > **PR #10**: ✅ MERGED — P3 tooling/leakage-fix/rolling framework
 > **PR #11**: OPEN — P3.1 severe-aware rolling (NO-GO, low-priority tooling merge)
 > **PR #12**: ✅ MERGED — LightGBM internal spike-weighting tooling
-> **PR #13**: OPEN — P3.3 spike-gated uplift (needs sync + merge)
+> **PR #13**: OPEN — P3.3 spike-gated uplift (research only, NOT deploy candidate)
+> **PR #14**: ✅ MERGED — P4 canonical evaluation pack
+> **PR #15**: OPEN — P4 LightGBM SOTA tuning (has conflict, research tooling only, NOT deploy candidate)
 
 ---
 
@@ -15,15 +17,16 @@
 
 | Role | Branch | Scope | Status |
 |------|--------|-------|--------|
-| **W0: Runner / 总控** | `tune-timemixer` | P4 five-window focus sprint coordinator | `ACTIVE` |
-| **W1: Data + Pack Auditor** | `tune-timemixer` | Audit feature leakage, pack quality, data integrity | `ACTIVE` |
-| **W2: SOTA Model Tuning** | `tune-timemixer` | LightGBM hyperparameter grid search, RT916/TimesFM eval | `ACTIVE` |
-| **W3: Spike Module / Risk Gate** | `tune-timemixer` | Risk model calibration, spike detection improvement | `ACTIVE` |
-| **W4: Fusion + Correction Finalizer** | `tune-timemixer` | Final fusion + correction pipeline tuning | `ACTIVE` |
+| **W0: Runner / 总控** | `tune-timemixer` | P5 Model Zoo + Final Fusion Big Run | `ACTIVE` |
+| **W1: Canonical + Dataset Builder** | `tune-timemixer` | Build canonical eval pack, audit data integrity | `ACTIVE` |
+| **W2: Tabular Model Zoo** | `tune-timemixer` | LightGBM variants, quantile, hyperparameter grid | `ACTIVE` |
+| **W3: Deep/TS Model Zoo** | `tune-timemixer` | RT916, TimesFM, SGDFNet, TimeMixer eval | `ACTIVE` |
+| **W4: Fusion + Correction Finalizer** | `tune-timemixer` | Final fusion + correction, baselined on canonical pack | `ACTIVE — MUST PASS BASELINE SANITY CHECK FIRST` |
 | **SA1 (Leakage Fix)** | `tune-timemixer` | FIX-01–FIX-04 + schema.py | `✅ MERGED via PR #10` |
 | **P3.1 (Severe-Aware)** | `agent/p31-severe-aware-rolling` | 3 severe-aware modes | `NO-GO — PR #11 OPEN` |
 | **P3.2 (Rolling+Correction)** | `tune-timemixer` | rolling + correction combo | `✅ MERGED via PR #10 (NO-GO)` |
 | **P3.4 Line G (TimesFM Smoke)** | `agent/p34-timesfm-diversity-smoke` | TimesFM diversity test | `COMPLETE — NO-GO` |
+| **P4 W3 (Spike Gate)** | `tune-timemixer` | Hybrid ML+Rule spike gate | `COMPLETE — RESEARCH GO` |
 
 ---
 
@@ -267,3 +270,70 @@ Single-model or core-module improves sMAPE by ≥ 1.0 vs its fair baseline AND h
 |------|-------|:-----:|:------:|:-------:|
 | 2025-11-01~2025-11-15 (small) | obj_quantile_0p8 | 18.6124 | 12 | GO ✅ |
 | 2025-11-01~2025-12-31 (full) | obj_quantile_0p8 | 27.1655 | 25 | see report |
+
+**P4 VERDICT: NO-GO** — W3 reached RESEARCH GO (severe=56), W2 showed single-model GO on small window. But W4 finalizer baseline mismatch invalidated results. No P4 candidate beats Phase 2 champion.
+
+---
+
+## P5 — Model Zoo + Final Fusion Big Run
+
+> **Goal**: Execute broad model search across tabular and deep/TS model families, then fuse + correct into final system.
+> **Champion baseline**: Phase 2 lightgbm_anchor_90 + medium + normal — sMAPE=20.8675, severe=63, false_lift≤10%.
+
+### P5 DEPLOY GO
+
+| Criteria | Threshold |
+|----------|-----------|
+| sMAPE | ≤ 20.50 |
+| severe | ≤ 63 |
+| false_lift | ≤ 10% |
+| normal_degradation | ≤ 0.5 |
+
+### P5 RESEARCH GO
+
+| Criteria | Threshold |
+|----------|-----------|
+| sMAPE | ≤ 20.00 |
+| severe | ≤ 70 |
+| false_lift | ≤ 12% |
+| Or single-model | ≥ 1.0 sMAPE improvement vs fair baseline |
+
+### Windows
+
+| Window | Role | Scope | Status |
+|--------|------|-------|--------|
+| **W1** | Canonical + Dataset Builder | Build eval pack, lock date range, audit features, reproduce Phase 2 baseline | `COMPLETE — PR #14 MERGED` |
+| **W2** | Tabular Model Zoo | LightGBM variants, quantile regression, hyperparameter grid | `ACTIVE — PR #15 (has conflict)` |
+| **W3** | Deep/TS Model Zoo | RT916, TimesFM, SGDFNet, TimeMixer — evaluate on canonical pack | `ACTIVE` |
+| **W4** | Fusion + Correction Finalizer | Combine best from W2+W3 + Phase2 candidates → fused + corrected output. **Must pass baseline sanity check first.** | `ACTIVE — PENDING INPUTS` |
+
+### Results Log
+
+| Date | Window | Result | Verdict |
+|------|--------|--------|---------|
+| — | — | — | — |
+
+---
+
+## Blockers
+
+| ID | Blocker | Status |
+|----|---------|--------|
+| B20 | Rolling fusion severe exceedance | INACTIVE |
+| B21 | P3 NO-GO — no rolling approach beats Phase2 | CLOSED |
+| B22 | P4 NO-GO — W4 baseline mismatch invalidated results | CLOSED |
+| B23 | **No approach beats Phase 2 on sMAPE + severe simultaneously** | **OPEN — P5 objective** |
+
+## Next Actions
+
+1. ✅ PR #10 merged (P3 rolling framework)
+2. ✅ PR #12 merged (LightGBM weighting tooling)
+3. ✅ PR #14 merged (P4 canonical eval pack)
+4. ⏳ PR #15: resolve conflict → merge as research tooling (NOT deploy candidate)
+5. ⏳ PR #13: spike-gated uplift — deferred, research only
+6. ⏳ PR #11: P3.1 severe-aware rolling — low-priority tooling
+7. 🏃 **P5 W2**: Tabular model zoo — run LightGBM variants
+8. 🏃 **P5 W3**: Deep/TS model zoo — eval RT916, TimesFM, SGDFNet, TimeMixer
+9. 🏃 **P5 W4**: Final fusion — await W2+W3 inputs, must pass baseline sanity check first
+10. 🎯 **First P5 candidate meeting DEPLOY GO** → new champion
+11. 🎯 **Fallback**: Deploy Phase 2 as production

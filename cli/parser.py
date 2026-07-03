@@ -131,4 +131,20 @@ def build_parser() -> argparse.ArgumentParser:
     gate_group.add_argument("--allow-low-ytrue", action="store_true", default=False,
         help="Allow pipeline to continue even if y_true coverage < 95%% for some models")
 
+
+    # --- Intraday Tracker (Phase 11) ---
+    intraday_group = parser.add_argument_group("Intraday Tracker Options")
+    intraday_group.add_argument("--intraday-pack", default=None,
+        help="Path to intraday correction pack CSV from deep branch")
+    intraday_group.add_argument("--intraday-mode", default="shadow",
+        choices=["shadow", "low_weight", "high_weight", "off"],
+        help="Intraday tracker mode (default: shadow)")
+    intraday_group.add_argument("--intraday-config", default="config/intraday_tracker.yaml",
+        help="Path to intraday tracker config YAML")
+    intraday_group.add_argument("--cutoff-hour", type=int, default=None,
+        help="Override cutoff hour for intraday tracker")
+    intraday_group.add_argument("--prediction-mode", default="FULL_DAY",
+        choices=["FULL_DAY", "INTRADAY"],
+        help="Prediction mode (default: FULL_DAY)")
+
     return parser

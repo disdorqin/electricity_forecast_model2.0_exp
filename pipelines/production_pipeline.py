@@ -691,6 +691,112 @@ def _apply_weights(forecast_df, weights_df, target):
     return pd.DataFrame(), pd.DataFrame()
 
 
+
+
+# ── Step 4b: Intraday Tracker Correction (Phase 11) ─────────────────
+def _step4b_intraday_correction(args, ddir: Path, manifest: dict) -> None:
+    """Apply intraday tracker correction after fusion, before classifier.
+
+    Only runs for realtime target when --prediction-mode=INTRADAY.
+    Default mode is shadow (no actual correction applied).
+    """
+    prediction_mode = getattr(args, "prediction_mode", "FULL_DAY")
+    intraday_mode = getattr(args, "intraday_mode", "shadow")
+    intraday_pack_path = getattr(args, "intraday_pack", None)
+
+    # Only for realtime
+    fused_csv = ddir / "realtime" / "fused" / "fused_predictions.csv"
+    if not _file_nonempty(fused_csv):
+        logger.info("Step 4b: No realtime fusion output, skipping intraday correction")
+        manifest["steps"]["intraday_correction"] = "skipped: no fusion"
+        return
+
+    if prediction_mode != "INTRADAY":
+        logger.info("Step 4b: prediction_mode=%s, intraday tracker disabled", prediction_mode)
+        manifest["steps"]["intraday_correction"] = f"disabled: prediction_mode={prediction_mode}"
+        return
+
+    if intraday_mode == "off":
+        logger.info("Step 4b: intraday_mode=off, skipping")
+        manifest["steps"]["intraday_correction"] = "disabled: mode=off"
+        return
+
+    logger.info("STEP 4b: Intraday Tracker correction (mode=%s, prediction_mode=%s)", intraday_mode, prediction_mode)
+
+    try:
+        from corrections.intraday_tracker.adapter import load_intraday_pack, normalize_intraday_pack, validate_intraday_pack
+        from corrections.intraday_tracker.apply import apply_intraday_tracker_correction
+        from corrections.intraday_tracker.policy import IntradayTrackerMainlineConfig
+        from corrections.intraday_tracker.manifest import build_manifest, write_manifest_and_report
+
+        # Load config
+        config_path = getattr(args, "intraday_config", "config/intraday_tracker.yaml")
+        config = IntradayTrackerMainlineConfig.from_yaml(config_path)
+
+        # Load base forecast
+        base_df = pd.read_csv(fused_csv)
+        if "y_fused" in base_df.columns:
+            base_df["rt_pred"] = base_df["y_fused"]
+        elif "y_pred" in base_df.columns:
+            base_df["rt_pred"] = base_df["y_pred"]
+
+        # Load intraday pack
+        if intraday_pack_path:
+            raw_pack = load_intraday_pack(intraday_pack_path)
+            pack = normalize_intraday_pack(raw_pack, source_pack_path=intraday_pack_path)
+            validation = validate_intraday_pack(pack, mode="online")
+            if not validation.valid:
+                logger.warning("Step 4b: Pack validation failed: %s", validation.errors)
+                manifest["steps"]["intraday_correction"] = f"disabled: validation_failed"
+                manifest["warnings"].extend(validation.errors)
+                # Safe fallback: write manifest with disabled state
+                intraday_out = _ensure_dir(ddir / "reports" / "local" / "phase11" / "intraday_mainline")
+                fallback_manifest = build_manifest({
+                    "intraday_enabled": False, "intraday_mode": intraday_mode,
+                    "prediction_mode": prediction_mode, "pack_rows": len(raw_pack),
+                    "fallback_reason": "; ".join(validation.errors), "safe_fallback": True,
+                }, pack_path=intraday_pack_path)
+                write_manifest_and_report(fallback_manifest, str(intraday_out))
+                return
+        else:
+            pack = pd.DataFrame()
+
+        # Apply correction
+        result_df, stats = apply_intraday_tracker_correction(
+            base_df, pack, mode=intraday_mode, config=config, prediction_mode=prediction_mode,
+        )
+
+        # Write intraday outputs
+        intraday_out = _ensure_dir(ddir / "reports" / "local" / "phase11" / "intraday_mainline")
+        intraday_manifest = build_manifest(stats, pack_path=intraday_pack_path or "")
+
+        # Extract intraday rows (matched only)
+        intraday_rows = result_df[result_df.get("intraday_available", False)] if "intraday_available" in result_df.columns else pd.DataFrame()
+        write_manifest_and_report(intraday_manifest, str(intraday_out), intraday_rows_df=intraday_rows, final_df=result_df)
+
+        # Update fused predictions if corrections were applied
+        if stats["applied_rows"] > 0:
+            # Write updated fused predictions
+            result_df.to_csv(fused_csv, index=False)
+            logger.info("Step 4b: Applied intraday correction to %d rows", stats["applied_rows"])
+        else:
+            logger.info("Step 4b: No rows applied (shadow or disabled)")
+
+        manifest["steps"]["intraday_correction"] = f"complete: mode={intraday_mode}, applied={stats['applied_rows']}, shadow={stats['shadow_rows']}"
+        manifest["intraday_tracker"] = intraday_manifest.to_dict()
+
+    except ImportError as exc:
+        logger.warning("Step 4b: Import error (corrections module not available): %s", exc)
+        manifest["steps"]["intraday_correction"] = f"skipped: import_error"
+        manifest["warnings"].append(f"Intraday tracker import error: {exc}")
+    except Exception as exc:
+        logger.warning("Step 4b: Failed (non-fatal): %s", exc)
+        manifest["steps"]["intraday_correction"] = f"failed: {exc}"
+        manifest["warnings"].append(f"Intraday tracker failed: {exc}")
+
+    _save_manifest(ddir, manifest)
+
+
 # ── Step 5: Classifier ───────────────────────────────────────────────
 def _step5_classifier(args, ddir: Path, manifest: dict) -> Path | None:
     """Run negative price classifier on realtime fusion output."""
@@ -1030,6 +1136,10 @@ def run_production_for_date(args, dt: str) -> dict:
                 return manifest
 
         if "realtime" in targets:
+            t_step = time.time()
+            _step4b_intraday_correction(args, ddir, manifest)
+            manifest["timing"]["intraday_correction_seconds"] = round(time.time() - t_step, 1)
+
             t_step = time.time()
             _step5_classifier(args, ddir, manifest)
             manifest["timing"]["classifier_seconds"] = round(time.time() - t_step, 1)

@@ -1,0 +1,27 @@
+# Intraday Tracker Mainline Configuration — Phase 11
+# Controls the second layer of policy defense in the main pipeline.
+
+enabled: true
+default_mode: shadow
+
+# Cutoff gating
+min_cutoff_hour: 12
+high_weight_cutoff_hour: 14
+
+# Confidence thresholds
+min_confidence_low: 0.35
+min_confidence_high: 0.55
+
+# Observation requirements
+min_observed_hours: 3
+max_residual_std: 180
+
+# Fusion weights
+low_weight: 0.12
+high_weight: 0.22
+max_fusion_weight: 0.25
+
+# Safety
+disable_full_day: true
+disable_day_ahead: true
+negative_guardrail: true

@@ -31,6 +31,11 @@ from extreme.negative_price.apply_negative_correction import (
 from extreme.negative_price.residual_correction import NegativeResidualCorrector
 from extreme.negative_price.risk_model import NegativeRiskModel
 
+from residual_stack.risk_source import (
+    RiskSource,
+    detect_risk_source,
+    resolve_risk_policy,
+)
 from residual_stack.priority import (
     check_high_spike_priority,
     format_module_sequence,
@@ -90,6 +95,12 @@ class StackResult:
     data_limited: bool = False
     """True if negative sample count was too low for reliable evaluation."""
 
+    risk_source: RiskSource = RiskSource.MISSING
+    """Detected risk source for spike data."""
+
+    run_status: str = "data_missing"
+    """Policy resolution status: official / dry_run / data_missing."""
+
 
 # ── Orchestrator ───────────────────────────────────────────────────────
 
@@ -144,7 +155,8 @@ class ResidualStackOrchestrator:
         Returns
         -------
         StackResult
-            Corrected DataFrame with structured metadata.
+            Corrected DataFrame with structured metadata, including
+            ``risk_source`` and ``run_status`` fields for policy evaluation.
         """
         profile = profile or StackProfile()
         logger.info(
@@ -163,6 +175,16 @@ class ResidualStackOrchestrator:
                 f"Prediction column '{self.pred_col}' not found in pack. "
                 f"Available: {sorted(df.columns)}"
             )
+
+        # ── Detect risk source from available data ──────────────────
+        risk_source = detect_risk_source(
+            spike_risk_path=str(spike_risk_path) if spike_risk_path else None,
+            df=df,
+        )
+        _, run_status = resolve_risk_policy(risk_source)
+        logger.info(
+            "Risk source: %s → %s", risk_source.value, run_status,
+        )
 
         # ── Step 1: High-spike correction ───────────────────────────
         if spike_risk_path is not None:
@@ -192,7 +214,10 @@ class ResidualStackOrchestrator:
 
         logger.info("Residual stack done — %d rows processed", raw_len)
 
-        result = StackResult(df=df, profile_used=profile)
+        result = StackResult(
+            df=df, profile_used=profile,
+            risk_source=risk_source, run_status=run_status,
+        )
         return result
 
     # ── Internal: high-spike step ──────────────────────────────────────

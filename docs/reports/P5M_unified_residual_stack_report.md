@@ -126,8 +126,79 @@ The evaluation script (`scripts/evaluate_p5m_residual_stack.py`) compares:
 | B | high_spike only | Phase2 + plugin dry-run |
 | C | negative only | Phase2 + negative residual |
 | D | high_spike + negative | Full unified stack |
+## 6. Risk Source Policy
 
-## 7. Future Production Integration Path
+Each config that uses spike risk data (B, D) is classified by its **risk
+source**. This determines whether the verdict is official, dry-run, or
+DATA-MISSING.
+
+### Hierarchy
+
+| RiskSource | Detection | Verdict Eligibility |
+|---|---|---|
+| `REAL_PROB` | Explicit `spike_risk_path` file | Official GO / NO-GO |
+| `CALIBRATED_PROB` | `high_spike_prob` column in pack | Official GO / NO-GO |
+| `SYNTHETIC_FLAG` | Only `high_spike_flag` column | Dry-run only |
+| `MISSING` | No risk data at all | DATA-MISSING |
+
+### Policy Resolution
+
+| Source | `--allow-synthetic-risk` | Result |
+|---|---|---|
+| REAL / CALIBRATED | ignored | `can_run=True`, `status=official` |
+| SYNTHETIC_FLAG | `False` (default) | `can_run=False`, `status=data_missing` |
+| SYNTHETIC_FLAG | `True` | `can_run=True`, `status=dry_run` |
+| MISSING | ignored | `can_run=False`, `status=data_missing` |
+
+### Report Verdict Prefixes
+
+| Prefix | Meaning |
+|---|---|
+| `[official] GO` | Real/calibrated spike risk, all GO conditions met |
+| `[official] NO-GO` | Real/calibrated spike risk, condition(s) failed |
+| `[official] DATA-LIMITED` | Too few negative samples (still official) |
+| `[dry-run] ...` | Synthetic risk data, informative only |
+| `[data-missing] DATA-MISSING` | No spike risk data (configs B/D skip) |
+
+### Overall Verdict
+
+The overall verdict in the report is computed from **official** results only;
+dry-run and data-missing configs are excluded. If no config has official
+results, the overall verdict is `NO-OFFICIAL-RESULTS`.
+
+### Orchestrator Integration
+
+`ResidualStackOrchestrator.run()` detects and stores the risk source
+automatically. The result's `risk_source` and `run_status` fields are
+available for callers to inspect.
+
+### `--allow-synthetic-risk`
+
+```bash
+python scripts/evaluate_p5m_residual_stack.py      \
+    --canonical-pack outputs/.../prediction_pack.csv \
+    --allow-synthetic-risk
+```
+
+Without this flag, configs B and D produce `DATA-MISSING` when only a
+binary `high_spike_flag` is available.
+
+**Important**: Previously reported low_valley_MAE degradation (e.g., +12.69%
+in earlier E2E runs) was based on synthetic risk data and is considered a
+dry-run result, not an official regression.
+
+## 7. Comparison Configurations
+
+The evaluation script (``scripts/evaluate_p5m_residual_stack.py``) compares:
+
+| Config | Corrections | Risk Dependency | Description |
+|---|---|---|---|
+| A | None | None | Phase2 baseline (always official) |
+| B | high_spike only | Spike risk data | Phase2 + plugin |
+| C | negative only | None | Phase2 + negative residual (always official) |
+| D | high_spike + negative | Spike risk data | Full unified stack |
+
+## 8. Future Production Integration Path
 
 1. **Smoke test**: Run `evaluate_p5m_residual_stack.py` on canonical pack.
 2. **Profile tuning**: Adjust `--high-spike-profile` and `--negative-profile`.
@@ -159,12 +230,13 @@ residual_stack/
   orchestrator.py    — ResidualStackOrchestrator
   metrics.py         — compute_stack_metrics, compare_configs
   report.py          — generate_verdict, write_report
+  risk_source.py     — RiskSource enum, detection, policy
 
 scripts/
   evaluate_p5m_residual_stack.py — Evaluation script (A/B/C/D comparison)
 
 tests/
-  test_p5m_residual_stack.py     — 18+ tests
+  test_p5m_residual_stack.py     — 46+ tests
 
 docs/reports/
   P5M_unified_residual_stack_report.md — This document

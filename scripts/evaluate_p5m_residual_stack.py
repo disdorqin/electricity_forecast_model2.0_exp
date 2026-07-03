@@ -126,33 +126,91 @@ def _build_high_spike_only_metrics(
     spike_risk_path: str | Path | None,
     spike_profile: str,
 ) -> dict[str, Any]:
-    """Config B: Phase2 + high_spike only."""
-    if spike_risk_path is None:
-        # high_spike_prob already in pack — still need to run correction
-        pass
+    """Config B: Phase2 + high_spike only.
 
-    profile = StackProfile(
-        name=f"{spike_profile}+none",
-        spike_profile_name=spike_profile,
-        negative_profile_name="conservative",
-    )
-    orch = ResidualStackOrchestrator()
-    result = orch.run(
-        prediction_pack_path=None,  # We'll handle inline
-        spike_risk_path=spike_risk_path or "inline",
-        profile=profile,
-    )
-    # For inline usage, compute directly
+    Applies high-spike correction directly on *df* using the canonical
+    pack's existing ``high_spike_flag`` as a synthetic probability
+    (0.9 if flagged, 0.05 otherwise), or loads from *spike_risk_path*.
+    """
     out = df.copy()
-    # Apply high_spike only: use after_high_spike_pred as final
-    if "after_high_spike_pred" in out.columns:
-        out["final_pred"] = out["after_high_spike_pred"].values
-    else:
-        out["final_pred"] = out["base_fused_pred"].values
     out["base_pred"] = out["base_fused_pred"].values
-    if "after_negative_pred" not in out.columns:
-        out["after_negative_pred"] = out["final_pred"].values
+
+    # ── Resolve spike probability ───────────────────────────────────
+    if spike_risk_path is not None:
+        risk_df = pd.read_csv(spike_risk_path)
+        merged = pd.merge(
+            out, risk_df[["business_day", "hour_business", "high_spike_prob"]],
+            on=["business_day", "hour_business"], how="left",
+        )
+        spike_probs = merged["high_spike_prob"].fillna(0.0).values
+    elif "high_spike_prob" in out.columns:
+        spike_probs = out["high_spike_prob"].fillna(0.0).values
+    elif "high_spike_flag" in out.columns:
+        # Synthesise probability from flag
+        spike_probs = np.where(out["high_spike_flag"].astype(bool), 0.9, 0.05)
+    else:
+        # No spike signal at all — skip correction
+        out["after_high_spike_pred"] = out["base_fused_pred"].values
+        out["final_pred"] = out["base_fused_pred"].values
+        out["after_negative_pred"] = out["base_fused_pred"].values
+        out["high_spike_applied"] = False
+        out["negative_applied"] = False
+        out["correction_reason"] = "no_spike_signal"
+        out["module_sequence"] = "none"
+        return compute_stack_metrics(out)
+
+    # ── Apply high-spike correction row-by-row ──────────────────────
+    from extreme.realtime_high_spike.residual_lift import (
+        CorrectionMode, ResidualLiftConfig, ResidualLiftCorrector, get_period,
+    )
+    from extreme.realtime_high_spike.guardrail import (
+        GuardrailConfig, SpikeGuardrail,
+    )
+    from extreme.realtime_high_spike.apply_correction import CorrectionProfile
+    spike_cfg = CorrectionProfile(
+        name=spike_profile,
+        mode=CorrectionMode.NORMAL,
+    )
+
+    lcfg = spike_cfg.to_lift_config()
+    gcfg = spike_cfg.to_guardrail_config()
+    corrector = ResidualLiftCorrector(lcfg)
+    corrector.set_lift_candidates({p: 50.0 for p in ["1_8", "9_16", "17_24"]})
+    corrector._lift_candidates["9_16"] *= lcfg.period_9_16_boost
+    guardrail = SpikeGuardrail(gcfg)
+
+    spike_list: list[float] = []
+    final_list: list[float] = []
+    lift_list: list[float] = []
+
+    for _, row in out.iterrows():
+        base_pred = float(row.get("base_fused_pred", 0.0))
+        prob = float(spike_probs[row.name]) if row.name < len(spike_probs) else 0.0
+        hour_biz = int(row.get("hour_business", 12))
+
+        if pd.isna(base_pred):
+            base_pred = 0.0
+        if pd.isna(prob):
+            prob = 0.0
+
+        lift_result = corrector.compute_lift(base_pred, prob, hour_biz)
+        guard_result = guardrail.evaluate(
+            base_pred=base_pred, corrected_pred=lift_result.corrected_pred,
+            spike_prob=prob, hour_business=hour_biz,
+        )
+        spike_list.append(lift_result.corrected_pred)
+        final_list.append(guard_result.final_pred)
+        lift_list.append(guard_result.final_pred - base_pred)
+
+    out["after_high_spike_pred"] = final_list
+    out["high_spike_applied"] = [l > 0 for l in lift_list]
+    out["after_negative_pred"] = final_list
     out["negative_applied"] = False
+    out["final_pred"] = final_list
+    out["module_sequence"] = "high_spike→guardrail"
+    out["correction_reason"] = [
+        "high_spike_lifted" if l > 0 else "no_correction" for l in lift_list
+    ]
     return compute_stack_metrics(out)
 
 
@@ -236,30 +294,51 @@ def _build_unified_stack_metrics(
     negative_profile: str,
 ) -> dict[str, Any]:
     """Config D: Phase2 + high_spike + negative residual unified stack."""
-    profile = StackProfile(
-        name=f"{spike_profile}+{negative_profile}",
-        spike_profile_name=spike_profile,
-        negative_profile_name=negative_profile,
-    )
-    orch = ResidualStackOrchestrator()
-
-    # Write temp CSV for the orchestrator to read
+    # Build synthetic spike risk CSV if none was provided but we have a flag
     import tempfile
-    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w")
-    df.to_csv(tmp, index=False)
-    tmp_path = tmp.name
-    tmp.close()
 
+    tmp_pack = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w")
+    df.to_csv(tmp_pack, index=False)
+    tmp_pack_path = tmp_pack.name
+    tmp_pack.close()
+
+    tmp_risk: str | None = None
     try:
+        if spike_risk_path is not None:
+            effective_risk_path = str(spike_risk_path)
+        elif "high_spike_prob" in df.columns:
+            # Write just the prob column
+            risk_df = df[["business_day", "hour_business", "high_spike_prob"]].copy()
+            tmp_risk = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w").name
+            risk_df.to_csv(tmp_risk, index=False)
+            effective_risk_path = tmp_risk
+        elif "high_spike_flag" in df.columns:
+            risk_df = df[["business_day", "hour_business"]].copy()
+            risk_df["high_spike_prob"] = np.where(
+                df["high_spike_flag"].astype(bool), 0.9, 0.05
+            )
+            tmp_risk = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w").name
+            risk_df.to_csv(tmp_risk, index=False)
+            effective_risk_path = tmp_risk
+        else:
+            effective_risk_path = None
+
+        profile = StackProfile(
+            name=f"{spike_profile}+{negative_profile}",
+            spike_profile_name=spike_profile,
+            negative_profile_name=negative_profile,
+        )
+        orch = ResidualStackOrchestrator()
         result = orch.run(
-            prediction_pack_path=tmp_path,
-            spike_risk_path=spike_risk_path,
+            prediction_pack_path=tmp_pack_path,
+            spike_risk_path=effective_risk_path,
             profile=profile,
         )
+        return compute_stack_metrics(result.df)
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-    return compute_stack_metrics(result.df)
+        Path(tmp_pack_path).unlink(missing_ok=True)
+        if tmp_risk is not None:
+            Path(tmp_risk).unlink(missing_ok=True)
 
 
 def main() -> None:

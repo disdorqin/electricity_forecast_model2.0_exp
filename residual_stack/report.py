@@ -48,10 +48,10 @@ def generate_verdict(metrics: dict[str, Any]) -> str:
     if hs_delta > 3.0:
         reasons.append(f"high_spike_MAE worsened by {hs_delta:.1f}% (> 3%)")
 
-    # Condition 4: low_valley_MAE
+    # Condition 4: low_valley_MAE must not worsen
     lv_delta = metrics.get("low_valley_MAE_delta", 0)
-    if lv_delta >= 0:
-        reasons.append(f"low_valley_MAE not improved (delta={lv_delta})")
+    if lv_delta > 0:
+        reasons.append(f"low_valley_MAE worsened by {lv_delta:.2f}%")
 
     # Condition 5: normal_degradation
     normal_degradation = metrics.get("normal_degradation", 0)

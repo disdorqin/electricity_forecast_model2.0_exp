@@ -288,6 +288,29 @@ class TestVerdict:
         }
         assert "NO-GO" in generate_verdict(metrics)
 
+    def test_go_when_no_change(self):
+        """Baseline with delta=0 should be GO (no regression)."""
+        metrics = {
+            "data_limited": False,
+            "overall_sMAPE_delta": 0.0,
+            "low_valley_MAE_delta": 0.0,
+            "high_spike_MAE_delta_pct": 0.0,
+            "normal_degradation": 0.0,
+        }
+        assert generate_verdict(metrics) == "GO"
+
+    def test_no_go_when_low_valley_worsens(self):
+        """Positive low_valley_MAE_delta should trigger NO-GO."""
+        metrics = {
+            "data_limited": False,
+            "overall_sMAPE_delta": 0.1,
+            "low_valley_MAE_delta": 5.0,
+            "high_spike_MAE_delta_pct": 1.0,
+            "normal_degradation": 0.2,
+        }
+        assert "NO-GO" in generate_verdict(metrics)
+        assert "worsened" in generate_verdict(metrics)
+
     def test_data_limited_when_few_samples(self):
         metrics = {
             "data_limited": True,

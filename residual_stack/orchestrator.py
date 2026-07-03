@@ -23,7 +23,6 @@ import pandas as pd
 from extreme.realtime_high_spike.apply_correction import (
     CorrectionMode,
     CorrectionProfile as SpikeProfile,
-    run_correction as run_spike_correction,
 )
 from extreme.negative_price.apply_negative_correction import (
     NegativeCorrectionProfile,
@@ -212,14 +211,6 @@ class ResidualStackOrchestrator:
         history_df: pd.DataFrame | None,
     ) -> pd.DataFrame:
         """Apply high-spike correction and record intermediate state."""
-        spike_df = run_spike_correction(
-            prediction_pack_path=None,  # We pass df directly via attrs approach
-            risk_predictions_path=spike_risk_path,
-            history_df=history_df,
-            profile=spike_profile,
-        )
-        # run_spike_correction loads from CSVs, so we need to merge
-        # Instead, let's do a leaner inline version
         logger.info("High-spike correction applied via spike risk: %s", spike_risk_path)
 
         # Merge spike results onto base df

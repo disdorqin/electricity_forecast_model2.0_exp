@@ -112,6 +112,7 @@ def run_calibration(
             risk_out = risk_out.drop(columns=["neg_ml", "lv_ml", "over_ml"], errors="ignore")
         except Exception as e:
             print(f"  WARNING: Risk consolidation failed: {e}")
+    risk_out["overestimate_low_prob"] = risk_out["overestimate_low_prob"].fillna(0.0)
     risk_out["risk_source"] = "calibrated_prob"
     risk_out["leakage_safe"] = True
     risk_out.to_csv(out_dir / "negative_risk_predictions.csv", index=False)

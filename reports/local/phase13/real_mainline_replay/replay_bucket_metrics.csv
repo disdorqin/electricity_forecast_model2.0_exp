@@ -1,0 +1,10 @@
+﻿label,bucket,smape_floor50,n_samples
+shadow,negative,1.4401470417740405,9
+shadow,spike,0.9041412349341902,4
+shadow,normal,0.34680602685592465,59
+low_weight,negative,1.4434668107966955,9
+low_weight,spike,0.9041412349341902,4
+low_weight,normal,0.3469722257244975,59
+high_weight,negative,1.4434668107966955,9
+high_weight,spike,0.9041412349341902,4
+high_weight,normal,0.3469722257244975,59

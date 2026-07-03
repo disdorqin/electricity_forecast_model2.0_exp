@@ -1,0 +1,6 @@
+{
+  "days_found": 3,
+  "total_rows": 72,
+  "date_range": "2026-02-01 .. 2026-02-03",
+  "output_path": "reports\\local\\phase13\\real_mainline_replay\\monthly_fused_predictions.csv"
+}

@@ -1,0 +1,34 @@
+{
+  "audit_timestamp": "2026-07-03T16:48:04",
+  "metrics_summary_path": "reports/local/phase13/real_mainline_replay/replay_metrics_summary.json",
+  "targets": {
+    "stretch_target": 15.0,
+    "acceptable_target": 20.0,
+    "reference_overall": 16.59,
+    "reference_9_16": 21.19
+  },
+  "current_smape": {
+    "baseline_sMAPE": null,
+    "low_weight_sMAPE": 0.5149878827035052,
+    "high_weight_sMAPE": 0.5149878827035052,
+    "shadow_sMAPE": 0.5144367208361483
+  },
+  "gaps": {
+    "baseline_sMAPE_gap_to_15": null,
+    "baseline_sMAPE_gap_to_20": null,
+    "low_weight_sMAPE_gap_to_15": 36.498788270350516,
+    "low_weight_sMAPE_gap_to_20": 31.498788270350516,
+    "high_weight_sMAPE_gap_to_15": 36.498788270350516,
+    "high_weight_sMAPE_gap_to_20": 31.498788270350516,
+    "shadow_sMAPE_gap_to_15": 36.443672083614835,
+    "shadow_sMAPE_gap_to_20": 31.443672083614835
+  },
+  "segment_smape": {
+    "baseline_9_16": null,
+    "low_weight_9_16": null
+  },
+  "segment_gaps": {
+    "baseline_9_16_gap_to_reference": null,
+    "low_weight_9_16_gap_to_reference": null
+  }
+}

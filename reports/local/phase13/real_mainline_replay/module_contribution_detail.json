@@ -1,0 +1,78 @@
+{
+  "evaluation_timestamp": "2026-07-03T16:48:07",
+  "fused_predictions_path": "reports/local/phase13/real_mainline_replay/monthly_fused_predictions.csv",
+  "ground_truth_path": "reports/local/phase13/real_mainline_replay/ground_truth_rt_2026_02.csv",
+  "intraday_pack_path": "reports/local/phase13/real_mainline_replay/aligned_pack.csv",
+  "stages": [
+    {
+      "label": "stage_a_sgdfnet",
+      "status": "NOT_AVAILABLE",
+      "delta_overall": "NOT_AVAILABLE",
+      "delta_9_16": "NOT_AVAILABLE"
+    },
+    {
+      "label": "stage_a_timesfm",
+      "status": "NOT_AVAILABLE",
+      "delta_overall": "NOT_AVAILABLE",
+      "delta_9_16": "NOT_AVAILABLE"
+    },
+    {
+      "label": "stage_b_fused",
+      "n_samples": 72,
+      "overall_smape": 0.5144367208361483,
+      "segment_9_16_smape": 1.2519078718762933,
+      "segment_9_16_n": 24,
+      "negative_bucket_smape": 1.4401470417740405,
+      "negative_bucket_n": 9,
+      "spike_bucket_smape": 0.9041412349341902,
+      "spike_bucket_n": 4,
+      "normal_bucket_smape": 0.34680602685592465,
+      "normal_bucket_n": 59,
+      "status": "OK",
+      "delta_overall": "NOT_AVAILABLE",
+      "delta_9_16": "NOT_AVAILABLE"
+    },
+    {
+      "label": "stage_c_shadow",
+      "n_samples": 72,
+      "overall_smape": 0.5144367208361483,
+      "segment_9_16_smape": 1.2519078718762933,
+      "segment_9_16_n": 24,
+      "negative_bucket_smape": 1.4401470417740405,
+      "negative_bucket_n": 9,
+      "spike_bucket_smape": 0.9041412349341902,
+      "spike_bucket_n": 4,
+      "normal_bucket_smape": 0.34680602685592465,
+      "normal_bucket_n": 59,
+      "status": "OK",
+      "delta_overall": 0.0,
+      "delta_9_16": 0.0,
+      "correction_stats": {
+        "matched_rows": 12,
+        "applied_rows": 0,
+        "avg_fusion_weight": 0.08
+      }
+    },
+    {
+      "label": "stage_c_low_weight",
+      "n_samples": 72,
+      "overall_smape": 0.5149878827035052,
+      "segment_9_16_smape": 1.2535613574783637,
+      "segment_9_16_n": 24,
+      "negative_bucket_smape": 1.4434668107966955,
+      "negative_bucket_n": 9,
+      "spike_bucket_smape": 0.9041412349341902,
+      "spike_bucket_n": 4,
+      "normal_bucket_smape": 0.3469722257244975,
+      "normal_bucket_n": 59,
+      "status": "OK",
+      "delta_overall": -0.05511618673568197,
+      "delta_9_16": -0.1653485602070459,
+      "correction_stats": {
+        "matched_rows": 12,
+        "applied_rows": 8,
+        "avg_fusion_weight": 0.08
+      }
+    }
+  ]
+}

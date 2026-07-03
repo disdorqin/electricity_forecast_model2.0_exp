@@ -1,0 +1,62 @@
+{
+  "replay_timestamp": "2026-07-03T16:47:20",
+  "smape_floor": 50,
+  "per_mode_metrics": {
+    "shadow": {
+      "overall_smape": 0.5144367208361483,
+      "n_samples": 72
+    },
+    "low_weight": {
+      "overall_smape": 0.5149878827035052,
+      "n_samples": 72
+    },
+    "high_weight": {
+      "overall_smape": 0.5149878827035052,
+      "n_samples": 72
+    }
+  },
+  "bucket_summary": {
+    "shadow": {
+      "negative": {
+        "smape_floor50": 1.4401470417740405,
+        "n_samples": 9
+      },
+      "spike": {
+        "smape_floor50": 0.9041412349341902,
+        "n_samples": 4
+      },
+      "normal": {
+        "smape_floor50": 0.34680602685592465,
+        "n_samples": 59
+      }
+    },
+    "low_weight": {
+      "negative": {
+        "smape_floor50": 1.4434668107966955,
+        "n_samples": 9
+      },
+      "spike": {
+        "smape_floor50": 0.9041412349341902,
+        "n_samples": 4
+      },
+      "normal": {
+        "smape_floor50": 0.3469722257244975,
+        "n_samples": 59
+      }
+    },
+    "high_weight": {
+      "negative": {
+        "smape_floor50": 1.4434668107966955,
+        "n_samples": 9
+      },
+      "spike": {
+        "smape_floor50": 0.9041412349341902,
+        "n_samples": 4
+      },
+      "normal": {
+        "smape_floor50": 0.3469722257244975,
+        "n_samples": 59
+      }
+    }
+  }
+}

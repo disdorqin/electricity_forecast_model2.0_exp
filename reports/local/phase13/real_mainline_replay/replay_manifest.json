@@ -1,0 +1,62 @@
+{
+  "replay_timestamp": "2026-07-03T16:47:20",
+  "fused_predictions_path": "reports/local/phase13/real_mainline_replay/monthly_fused_predictions.csv",
+  "intraday_pack_path": "reports/local/phase13/real_mainline_replay/aligned_pack.csv",
+  "ground_truth_path": "reports/local/phase13/real_mainline_replay/ground_truth_rt_2026_02.csv",
+  "prediction_mode": "INTRADAY",
+  "config_path": "config/intraday_tracker.yaml",
+  "simulated_modes": [
+    "shadow",
+    "low_weight",
+    "high_weight"
+  ],
+  "smape_floor": 50,
+  "baseline": {
+    "label": "baseline",
+    "overall_smape": 0.5144367208361483,
+    "n_samples": 72
+  },
+  "gain_vs_baseline": {
+    "shadow_gain_pp": 0.0,
+    "low_weight_gain_pp": -0.05511618673568197,
+    "high_weight_gain_pp": -0.05511618673568197
+  },
+  "per_mode_summary": {
+    "shadow": {
+      "overall_smape": 0.5144367208361483,
+      "n_samples": 72,
+      "matched_rows": 12,
+      "applied_rows": 0,
+      "shadow_rows": 12,
+      "disabled_rows": 60,
+      "avg_fusion_weight": 0.08,
+      "avg_confidence": 0.0,
+      "fallback_reason": null,
+      "safe_fallback": true
+    },
+    "low_weight": {
+      "overall_smape": 0.5149878827035052,
+      "n_samples": 72,
+      "matched_rows": 12,
+      "applied_rows": 8,
+      "shadow_rows": 4,
+      "disabled_rows": 60,
+      "avg_fusion_weight": 0.08,
+      "avg_confidence": 0.0,
+      "fallback_reason": null,
+      "safe_fallback": true
+    },
+    "high_weight": {
+      "overall_smape": 0.5149878827035052,
+      "n_samples": 72,
+      "matched_rows": 12,
+      "applied_rows": 8,
+      "shadow_rows": 4,
+      "disabled_rows": 60,
+      "avg_fusion_weight": 0.08,
+      "avg_confidence": 0.0,
+      "fallback_reason": null,
+      "safe_fallback": true
+    }
+  }
+}

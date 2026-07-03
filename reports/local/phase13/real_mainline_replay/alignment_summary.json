@@ -1,0 +1,24 @@
+{
+  "alignment_timestamp": "2026-07-03T16:43:58",
+  "fused_predictions_path": "reports/local/phase13/real_mainline_replay/monthly_fused_predictions.csv",
+  "intraday_pack_path": "D:/作业/大创_挑战杯_互联网/大学生创新创业计划/大创实现/其他资料/deep_model_for_electricity/reports/local/phase10/intraday_tracker_stability/correction_pack_phase10.csv",
+  "matched_rows": 12,
+  "missing_pack_rows": 60,
+  "extra_pack_rows": 100,
+  "aligned_pack_size": 12,
+  "cutoff_distribution": {
+    "12": 12
+  },
+  "policy_distribution": {
+    "LOW_WEIGHT": 8,
+    "SHADOW_ONLY": 4
+  },
+  "confidence_distribution": {
+    "mean": 0.5601428927609433,
+    "median": 0.5892739134064215,
+    "min": 0.4933333333333333,
+    "max": 0.5978214315430753,
+    "std": 0.0494765541517679
+  },
+  "duplicate_rows_removed": 0
+}

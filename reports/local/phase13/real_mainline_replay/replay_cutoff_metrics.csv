@@ -1,0 +1,4 @@
+﻿label,cutoff_hour,smape_floor50,n_samples
+shadow,12,1.323602830967257,12
+low_weight,12,1.3269098021713979,12
+high_weight,12,1.3269098021713979,12

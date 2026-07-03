@@ -1,0 +1,10 @@
+﻿mode,policy_decision,count
+shadow,LOW_WEIGHT,8
+shadow,SHADOW_ONLY,4
+shadow,GUARDRAIL:negative_price_risk,2
+low_weight,LOW_WEIGHT,8
+low_weight,SHADOW_ONLY,4
+low_weight,GUARDRAIL:negative_price_risk,2
+high_weight,LOW_WEIGHT,8
+high_weight,SHADOW_ONLY,4
+high_weight,GUARDRAIL:negative_price_risk,2

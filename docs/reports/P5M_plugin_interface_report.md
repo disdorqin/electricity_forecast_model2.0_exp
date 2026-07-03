@@ -2,98 +2,137 @@
 
 ## 1. 为什么需要接口模块
 
-现有预测流水线（`pipelines/production_pipeline.py`）内部深度耦合多个模型
-（LightGBM、TimeMixer、TimesFM、SGDFNet、RT916）的适配逻辑。当一个外部
-模型需要接入融合、修正、监控链路时，必须：
+现有预测流水线内部深度耦合多个模型的适配逻辑。当一个外部
+模型需要接入融合、修正、监控链路时，必须了解内部 adapter 架构并修改
+生产管线代码。
 
-- 了解内部 adapter 架构
-- 修改 production_pipeline.py 本身
-- 绕过多层抽象才能完成简单的 CSV 接入
-
-**接口模块（`pipeline_ext/`）** 的解耦目标：
+**Plugin 接口模块（`plugin/`）** 的解耦目标：
 
 | 问题 | 接口模块方案 |
 |------|-------------|
-| 模型适配逻辑散落在多个 adapter 中 | 统一 `PredictionProvider` 抽象 |
-| 修正逻辑无统一基类 | `CorrectionModule` 定义 `apply(df) → df` |
-| 监控指标散写在脚本中 | `MonitorModule` 定义 `run(df) → dict` |
-| 模型 CSV 无统一校验 | `io.load_prediction_csv` 执行 schema + 业务规则检查 |
-| 生产管线需经过完整部署才能测试 | `DryRunPipeline` 支持本地快速 smoke test |
+| 模型适配逻辑散落 | 统一 `PipelineAdapter` facade |
+| 修正逻辑无统一基类 | `CorrectionModule` ABC + `CorrectionRegistry` |
+| 监控指标散写在脚本中 | `MonitorModule` ABC + `MonitorRegistry` |
+| 模型 CSV 无统一校验 | `PredictionTableSpec` + `standardize_predictions` |
+| 生产管线需完整部署才能测试 | `PipelineAdapter.run()` 支持显式 df |
 
-## 2. 外部模型如何接入
+## 2. P5 External Model 数据契约
 
-### 2.1 准备 CSV
-
-任何外部模型的预测结果只需满足 `pipeline_ext.schema.REQUIRED_FIELDS`：
+### 2.1 必需字段（8 列）
 
 ```text
-model_name, business_day, hour_business, timestamp, y_pred,
-source_file, prediction_mode, leakage_safe
+model_name       — 模型名称（任意字符串）
+business_day     — 交易日日期 YYYY-MM-DD
+hour_business    — 交易小时 1-24（hour 24 = 次日 00:00，归属 business_day D）
+timestamp        — 完整时间戳（可由 business_day + hour_business 自动推断）
+y_pred           — 预测价格
+source_file      — 来源 CSV 文件名
+prediction_mode  — "dayahead" | "realtime" | "external"
+leakage_safe     — 必须为小写字符串 "true"
 ```
 
-### 2.2 使用 load_prediction_csv 校验
+### 2.2 可选字段（9 列）
 
-```python
-from pipeline_ext.io import load_prediction_csv
-
-df = load_prediction_csv("external_model_outputs/predictions.csv")
+```text
+y_true           — 实际价格（评估用，外部 CSV 可缺失）
+base_fused_pred  — 融合后修正前预测
+final_pred       — 最终预测
+high_spike_prob  — 高尖峰概率
+negative_prob    — 负价格概率
+low_valley_prob  — 低谷概率
+module_name      — 修正/监控模块标识
+task             — "dayahead" | "realtime"（兼容旧格式）
+period           — "1_8" | "9_16" | "17_24"（可自动推断）
 ```
 
-校验链：
-1. 必需字段存在 → 2. leakage_safe === true → 3. y_pred 无缺失 → 4. (business_day, hour_business) 唯一 → 5. (timestamp, model_name) 唯一（可选关闭）
+### 2.3 核心规则
 
-### 2.3 可选：实现 PredictionProvider
+- `leakage_safe` 必须是字符串 `"true"`（严格校验，大写 `True`、`"false"` 均拒绝）
+- Hour 24 约定：00:00 时间戳 → `business_day - 1`, `hour_business = 24`
+- (model_name, business_day, hour_business) 构成主键，不允许重复
+- 支持 `allow_long_format=True` 以允许 ensemble 场景下的多行/小时
+- 兼容旧别名：`target_day` → `business_day`，`ds` → `timestamp`
+
+### 2.4 使用示例
 
 ```python
-from pipeline_ext.modules import PredictionProvider
-from pipeline_ext.registry import register_prediction_provider
+from plugin.schema import PredictionTableSpec, standardize_predictions
 
-class MyModelProvider(PredictionProvider):
-    def load_predictions(self, path: str) -> pd.DataFrame:
-        # custom loading logic
-        return df
-
-register_prediction_provider("my_model", MyModelProvider())
+spec = PredictionTableSpec()
+df = standardize_predictions(raw_df, spec=spec)
 ```
 
-## 3. Correction 模块如何接入
+## 3. 外部 CSV 加载
 
-### 3.1 实现 CorrectionModule
+### 3.1 ExternalPredictionSource 配置
 
 ```python
-from pipeline_ext.modules import CorrectionModule
+from plugin.external_loader import ExternalPredictionSource, load_external_predictions
+
+source = ExternalPredictionSource(
+    path="external_model_outputs/predictions.csv",
+    column_mapping={"date": "business_day", "hour": "hour_business", "pred": "y_pred"},
+    model_name_override="my_model",
+    source_file_tag="my_model_v1",
+    prediction_mode_override="dayahead",
+)
+
+df = load_external_predictions(source)
+```
+
+### 3.2 加载流程
+
+1. 读取 CSV
+2. 按 column_mapping 重命名列（identity 映射也可）
+3. 应用 overrides（model_name、source_file、prediction_mode）
+4. 调用 `standardize_predictions()` 执行完整规范化
+
+## 4. Correction 模块
+
+### 4.1 定义 CorrectionModule
+
+```python
+from plugin.correction_base import CorrectionModule
 
 class MyCorrection(CorrectionModule):
-    name = "my_correction"
+    @property
+    def name(self) -> str:
+        return "my_correction"
 
-    def apply(self, df: pd.DataFrame) -> pd.DataFrame:
+    def correct(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         out = df.copy()
         out["y_pred"] = out["y_pred"].clip(lower=0)
         return out
+
+    def validate(self, df: pd.DataFrame) -> bool:
+        return "y_pred" in df.columns
 ```
 
-### 3.2 注册
+### 4.2 注册与执行
 
 ```python
-from pipeline_ext.registry import register_correction_module
-register_correction_module("my_correction", MyCorrection())
+from plugin.correction_registry import CorrectionRegistry
+
+registry = CorrectionRegistry()
+registry.register(MyCorrection())
+result = registry.run_all(df)
 ```
 
-### 3.3 执行顺序
+Correction 按注册顺序依次执行。
 
-Correction 模块按注册顺序执行。无依赖时按名称排序。
+## 5. Monitor 模块
 
-## 4. Monitor 模块如何接入
-
-### 4.1 实现 MonitorModule
+### 5.1 定义 MonitorModule
 
 ```python
-from pipeline_ext.modules import MonitorModule
+from plugin.monitor_base import MonitorModule
 
 class MyMonitor(MonitorModule):
-    name = "my_monitor"
+    @property
+    def name(self) -> str:
+        return "my_monitor"
 
-    def run(self, df: pd.DataFrame) -> dict:
+    def monitor(self, df: pd.DataFrame, **kwargs) -> dict:
         return {
             "n_rows": len(df),
             "mean_pred": float(df["y_pred"].mean()),
@@ -101,71 +140,69 @@ class MyMonitor(MonitorModule):
         }
 ```
 
-### 4.2 注册
+### 5.2 注册与执行
 
 ```python
-register_monitor_module("my_monitor", MyMonitor())
+from plugin.monitor_registry import MonitorRegistry
+
+registry = MonitorRegistry()
+registry.register(MyMonitor())
+report = registry.run_all(df)
 ```
 
-### 4.3 结果收集
+所有 Monitor 返回 JSON-serialisable dict，汇聚为 `{name.key: value}` 格式。
 
-所有 Monitor 返回 JSON-serialisable dict，汇聚后写入 `monitor_report.json`。
-
-## 5. 当前不接 production_pipeline
-
-`pipeline_ext/` 当前设计为**独立的 smoke-test 层**：
-
-- 不导入 `pipelines.production_pipeline`
-- 不依赖内部 adapter 结构
-- 不修改任何现有生产代码
-
-`DryRunPipeline` 只做 dry-run：
-
-```bash
-python scripts/run_p5m_plugin_pipeline_smoke.py \
-    --prediction-pack outputs/my_model/predictions.csv \
-    --correction-modules identity,clamp_low \
-    --out-dir outputs/plugin_smoke
-```
-
-## 6. 后续 Production Integration 入口
-
-当外部模型经过 smoke test 验证后，接入 production 的推荐路径：
-
-1. 在 `pipeline_ext/` 基础上扩展 `ProductionAdapter`，包装已有 `DryRunPipeline`
-2. 在 `pipelines/production_pipeline.py` 的 Step 2/3 之间插入：
+## 6. PipelineAdapter 编排
 
 ```python
-from pipeline_ext.pipeline import DryRunPipeline
-from pipeline_ext.registry import get_module
+from plugin.pipeline_adapter import PipelineAdapter
 
-# 预检查：dry-run 验证
-dry = DryRunPipeline()
-dry.run_from_path("external_preds.csv")
+adapter = PipelineAdapter()
+adapter.register_external_source(source)
+adapter.register_correction(MyCorrection())
+adapter.register_monitor(MyMonitor())
 
-# production 集成：直接在 main pipeline 中调用
-correction = get_module("my_correction")
-df = correction.apply(df)
+# 自动加载外部 CSV → 修正 → 监控
+result_df, metrics_report = adapter.run()
+
+# 或传入已有 DataFrame
+result_df, metrics_report = adapter.run(df=existing_df)
 ```
 
-3. 可选择将 `pipeline_ext.pipeline` 提升为正式的 `PipelineStage`，加入
-   `staged_pipeline.py` 的生产流程
-
-## 文件清单
+## 7. 文件清单
 
 ```text
-pipeline_ext/
-  __init__.py    — Package init, exports
-  schema.py      — Unified prediction schema + validation helpers
-  registry.py    — Module registry (provider / correction / monitor)
-  io.py          — CSV load + full validation chain
-  modules.py     — ABCs: PredictionProvider, CorrectionModule, MonitorModule
-  pipeline.py    — DryRunPipeline orchestration
-
-scripts/
-  run_p5m_plugin_pipeline_smoke.py — Smoke test CLI
+plugin/
+  __init__.py             — Package init
+  schema.py               — PredictionTableSpec + standardize_predictions
+  external_loader.py      — ExternalPredictionSource + CSV 加载
+  correction_base.py      — CorrectionModule ABC
+  correction_registry.py  — CorrectionRegistry + run_corrections
+  monitor_base.py         — MonitorModule ABC
+  monitor_registry.py     — MonitorRegistry + run_monitors
+  pipeline_adapter.py     — PipelineAdapter facade
 
 tests/
-  test_p5m_plugin_interface.py     — Coverage: schema, registry, correction order,
-                                     leakage-safe, edge cases
+  test_p5m_plugin_interface.py         — 70 tests: schema, registry, pipeline
+  test_p5m_negative_residual_module.py — 24 tests: negative correction module
+
+scripts/
+  evaluate_p5m_negative_residual_module.py — Negative correction evaluation
 ```
+
+## 8. 测试覆盖（70 tests）
+
+| 测试类 | 说明 |
+|--------|------|
+| TestColumnAliases | target_day/ds 别名映射 |
+| TestTimestampMapping | timestamp ↔ (business_day, hour_business) 转换，hour 24 映射 |
+| TestPredictionTableSpec | schema 校验 8 必需 + 9 可选 + 主键 + long-format |
+| TestStandardizePredictions | standardize_predictions 完整规范化 |
+| TestExternalLoader | CSV 加载、映射、override |
+| TestCorrectionModule | ABC 基类 + 具体实现 |
+| TestCorrectionRegistry | 注册/去重/执行/校验 |
+| TestMonitorModule | ABC 基类 + 具体实现 |
+| TestMonitorRegistry | 注册/去重/执行 |
+| TestStandaloneFunctions | run_corrections / run_monitors 独立函数 |
+| TestPipelineAdapter | PipelineAdapter 端到端编排 |
+| TestP5Contract | y_true 非必需、leakage_safe 严格校验、hour 24 |

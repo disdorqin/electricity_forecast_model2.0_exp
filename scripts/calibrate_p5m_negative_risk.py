@@ -13,6 +13,7 @@ Usage:
 Output:
     - risk_heuristic_v2.csv
     - risk_rolling_ml.csv (if ML training succeeds)
+    - negative_risk_predictions.csv (consolidated for residual stack)
     - calibration_summary.json
 """
 
@@ -91,6 +92,29 @@ def run_calibration(
     except Exception as e:
         print(f"  WARNING: Rolling ML failed: {e}")
         summary["scorers"]["rolling_ml"] = {"status": f"FAILED: {e}"}
+
+    # ── Consolidated risk CSV for residual stack ──────────────────────
+    risk_out = heur[["business_day", "hour_business", "timestamp",
+                     "negative_prob", "low_valley_prob"]].copy()
+    risk_out["overestimate_low_prob"] = 0.0
+    # Prefer rolling_ml scores when available
+    if "rolling_ml" in summary["scorers"] and "status" not in summary["scorers"]["rolling_ml"]:
+        try:
+            merge_cols = ["business_day", "hour_business"]
+            ml_merge = ml_result[merge_cols + ["negative_prob", "low_valley_prob",
+                                                "overestimate_low_prob"]].copy()
+            ml_merge.columns = merge_cols + ["neg_ml", "lv_ml", "over_ml"]
+            risk_out = risk_out.merge(ml_merge, on=merge_cols, how="left")
+            ml_mask = risk_out["neg_ml"].notna()
+            risk_out.loc[ml_mask, "negative_prob"] = risk_out.loc[ml_mask, "neg_ml"]
+            risk_out.loc[ml_mask, "low_valley_prob"] = risk_out.loc[ml_mask, "lv_ml"]
+            risk_out.loc[ml_mask, "overestimate_low_prob"] = risk_out.loc[ml_mask, "over_ml"]
+            risk_out = risk_out.drop(columns=["neg_ml", "lv_ml", "over_ml"], errors="ignore")
+        except Exception as e:
+            print(f"  WARNING: Risk consolidation failed: {e}")
+    risk_out["risk_source"] = "calibrated_prob"
+    risk_out["leakage_safe"] = True
+    risk_out.to_csv(out_dir / "negative_risk_predictions.csv", index=False)
 
     # ── Write summary ────────────────────────────────────────────────
     report_path = out_dir / "calibration_summary.json"

@@ -95,7 +95,11 @@ def apply_mainline_intraday_policy(
 
     # n_observed may not be in normalized pack; get from original if available
     if "n_observed" not in df.columns:
-        df["n_observed"] = 0
+        # Fall back to observed_hours if available
+        if "observed_hours" in df.columns:
+            df["n_observed"] = pd.to_numeric(df["observed_hours"], errors="coerce").fillna(0).astype(int)
+        else:
+            df["n_observed"] = 0
     df["n_observed"] = pd.to_numeric(df["n_observed"], errors="coerce").fillna(0).astype(int)
 
     if "residual_std_today" not in df.columns:

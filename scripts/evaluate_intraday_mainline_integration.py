@@ -525,31 +525,99 @@ def write_integration_eval_report(
 def evaluate(
     base_forecast_path: str,
     intraday_pack_path: str,
-    ground_truth_path: str,
+    ground_truth_path: Optional[str],
     mode: str,
     out_dir: str,
     config_path: str,
+    *,
+    simulate_modes: Optional[List[str]] = None,
 ) -> str:
     """Run the full evaluation pipeline and return the verdict."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Determine which modes to simulate
+    eval_modes = simulate_modes if simulate_modes else list(EVAL_MODES)
+
     # ---- Load data ----
     logger.info("Loading base forecast from %s", base_forecast_path)
     base_df = load_base_forecast(base_forecast_path)
 
-    logger.info("Loading ground truth from %s", ground_truth_path)
-    gt_df = load_ground_truth(ground_truth_path)
-
     logger.info("Loading intraday pack from %s", intraday_pack_path)
     pack_df = load_and_prepare_pack(intraday_pack_path)
+
+    gt_df = None
+    if ground_truth_path:
+        logger.info("Loading ground truth from %s", ground_truth_path)
+        gt_df = load_ground_truth(ground_truth_path)
 
     logger.info("Loading config from %s", config_path)
     config = load_config(config_path)
 
-    # ---- Baseline metrics (no intraday correction) ----
-    logger.info("Computing baseline metrics (no correction)...")
+    # ---- Run each mode ----
+    all_metrics: List[dict] = []
+    all_hourly: List[pd.DataFrame] = []
+    stats_per_mode: Dict[str, dict] = {}
+
+    corrections_per_mode: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+    for eval_mode in eval_modes:
+        logger.info("Running correction in '%s' mode...", eval_mode)
+        result_df, stats = run_correction(base_df, pack_df, eval_mode, config)
+        stats_per_mode[eval_mode] = stats
+
+        if gt_df is not None:
+            merged = merge_with_ground_truth(result_df, gt_df, pred_col="rt_pred_after_intraday")
+            y_t = merged["rt_actual"].values
+            y_p = merged["prediction"].values
+            corrections_per_mode[eval_mode] = (y_t, y_p)
+
+            mode_metrics = compute_metrics(y_t, y_p, label=eval_mode)
+            all_metrics.append(mode_metrics)
+
+            mode_hourly = compute_hourly_metrics(
+                y_t, y_p, merged["hour_business"].values, label=eval_mode,
+            )
+            all_hourly.append(mode_hourly)
+
+    # ---- If no ground truth, output operational report only ----
+    if gt_df is None:
+        logger.info("No ground truth provided. Writing operational report only.")
+        # Write operational stats
+        write_policy_metrics(stats_per_mode, out)
+        write_cutoff_metrics(stats_per_mode, out)
+
+        # Write a simple operational report
+        lines = [
+            "# Phase 11 — Intraday Tracker Operational Report (No Ground Truth)",
+            "",
+            f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "No ground truth was provided. Only operational statistics are reported.",
+            "",
+        ]
+        for mode_name, stats in stats_per_mode.items():
+            lines += [
+                f"## {mode_name}",
+                "",
+                f"- Pack rows: {stats.get('pack_rows', 0)}",
+                f"- Matched rows: {stats.get('matched_rows', 0)}",
+                f"- Applied rows: {stats.get('applied_rows', 0)}",
+                f"- Shadow rows: {stats.get('shadow_rows', 0)}",
+                f"- Disabled rows: {stats.get('disabled_rows', 0)}",
+                f"- Avg fusion weight: {stats.get('avg_fusion_weight', 0.0):.4f}",
+                f"- Avg confidence: {stats.get('avg_confidence', 0.0):.4f}",
+                f"- Policy counts: {stats.get('policy_counts', {})}",
+                "",
+            ]
+        report_path = out / "operational_report.md"
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Operational report written to %s", report_path)
+        return "NO_GROUND_TRUTH"
+
+    # ---- Compute baseline metrics ----
     baseline_result, baseline_stats = run_correction(base_df, pack_df, "off", config)
+    stats_per_mode["baseline"] = baseline_stats
     baseline_merged = merge_with_ground_truth(baseline_result, gt_df, pred_col="rt_pred_before_intraday")
     y_true_base = baseline_merged["rt_actual"].values
     y_pred_base = baseline_merged["prediction"].values
@@ -559,31 +627,8 @@ def evaluate(
         baseline_merged["hour_business"].values,
         label="baseline",
     )
-
-    # ---- Run all three evaluation modes ----
-    all_metrics = [baseline_metrics]
-    all_hourly = [baseline_hourly]
-    stats_per_mode: Dict[str, dict] = {"baseline": baseline_stats}
-
-    corrections_per_mode: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
-
-    for eval_mode in EVAL_MODES:
-        logger.info("Running correction in '%s' mode...", eval_mode)
-        result_df, stats = run_correction(base_df, pack_df, eval_mode, config)
-        stats_per_mode[eval_mode] = stats
-
-        merged = merge_with_ground_truth(result_df, gt_df, pred_col="rt_pred_after_intraday")
-        y_t = merged["rt_actual"].values
-        y_p = merged["prediction"].values
-        corrections_per_mode[eval_mode] = (y_t, y_p)
-
-        mode_metrics = compute_metrics(y_t, y_p, label=eval_mode)
-        all_metrics.append(mode_metrics)
-
-        mode_hourly = compute_hourly_metrics(
-            y_t, y_p, merged["hour_business"].values, label=eval_mode,
-        )
-        all_hourly.append(mode_hourly)
+    all_metrics.insert(0, baseline_metrics)
+    all_hourly.insert(0, baseline_hourly)
 
     # ---- Compute gain metrics ----
     baseline_smape = baseline_metrics["overall_smape"]
@@ -665,13 +710,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Path to intraday correction pack CSV (Phase 10 handoff)",
     )
     parser.add_argument(
-        "--ground-truth", required=True,
-        help="Path to ground truth CSV (columns: business_day, hour_business, rt_actual/y_true)",
+        "--ground-truth", default=None,
+        help="Path to ground truth CSV (columns: business_day, hour_business, rt_actual/y_true). "
+             "If not provided, only shadow operational report is produced.",
     )
     parser.add_argument(
         "--mode", default="shadow", choices=["shadow", "low_weight", "high_weight"],
         help="Primary evaluation mode (default: shadow). All three modes are evaluated; "
              "this selects the primary mode for verdict determination.",
+    )
+    parser.add_argument(
+        "--simulate-modes", default=None,
+        help="Comma-separated list of modes to simulate "
+             "(default: shadow,low_weight,high_weight).",
+    )
+    parser.add_argument(
+        "--force-policy-regating", action="store_true", default=False,
+        help="Force main repo policy re-gating on top of pack's own fusion_weight.",
     )
     parser.add_argument(
         "--out-dir", default=DEFAULT_OUT_DIR,
@@ -706,11 +761,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     for label, path_str in [
         ("base-forecast", args.base_forecast),
         ("intraday-pack", args.intraday_pack),
-        ("ground-truth", args.ground_truth),
     ]:
         if not Path(path_str).is_file():
             logger.error("Input file not found: %s (%s)", label, path_str)
             return 1
+
+    if args.ground_truth and not Path(args.ground_truth).is_file():
+        logger.error("Input file not found: ground-truth (%s)", args.ground_truth)
+        return 1
+
+    # Parse simulate_modes
+    simulate_modes = None
+    if args.simulate_modes:
+        simulate_modes = [m.strip() for m in args.simulate_modes.split(",") if m.strip()]
 
     verdict = evaluate(
         base_forecast_path=args.base_forecast,
@@ -719,6 +782,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         mode=args.mode,
         out_dir=args.out_dir,
         config_path=args.config,
+        simulate_modes=simulate_modes,
     )
 
     logger.info("=" * 72)

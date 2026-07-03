@@ -59,7 +59,11 @@ def normalize_intraday_pack(df: pd.DataFrame, source_pack_path: str = "") -> pd.
                 "base_model_name", "base_pred", "intraday_corrected_pred",
                 "intraday_final_correction", "intraday_confidence",
                 "policy_decision", "fusion_weight", "shadow_only_flag",
-                "guardrail_reason", "mode"]:
+                "guardrail_reason", "mode",
+                # Pass-through fields needed by policy gating
+                "n_observed", "observed_hours", "residual_std_today",
+                "bias_direction", "y_true", "baseline_error",
+                "corrected_error"]:
         if col in df.columns:
             out[col] = df[col]
         else:
@@ -201,5 +205,12 @@ def _default_for(col: str):
         "shadow_only_flag": False,
         "guardrail_reason": "pack_missing",
         "source_pack_path": "",
+        "n_observed": 0,
+        "observed_hours": 0,
+        "residual_std_today": 0.0,
+        "bias_direction": "",
+        "y_true": float("nan"),
+        "baseline_error": float("nan"),
+        "corrected_error": float("nan"),
     }
     return defaults.get(col, None)

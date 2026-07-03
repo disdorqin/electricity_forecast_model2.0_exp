@@ -118,6 +118,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "dry-run evaluation. Without this flag, configs B/D are "
         "DATA-MISSING when only a binary flag is available.",
     )
+    parser.add_argument(
+        "--negative-risk-path",
+        type=str,
+        default=None,
+        help="Path to negative risk predictions CSV (must contain "
+        "negative_prob, low_valley_prob, overestimate_low_prob). "
+        "If provided, these probabilities are used for Config C/D "
+        "negative correction instead of heuristic fallback.",
+    )
     return parser.parse_args(argv)
 
 
@@ -296,10 +305,14 @@ def _build_negative_only_metrics(df: pd.DataFrame) -> dict[str, Any]:
         if pd.isna(base_pred_val):
             base_pred_val = 0.0
 
+        # Use calibrated negative risk if available, else heuristic fallback
+        neg_risk = float(row.get("negative_prob", 0.0))
+        lv_risk = float(row.get("low_valley_prob", 0.0))
+
         result = corrector.compute_downward_correction(
             base_pred=base_pred_val,
-            negative_risk=0.0,
-            low_valley_risk=0.0,
+            negative_risk=neg_risk,
+            low_valley_risk=lv_risk,
             hour_business=hour_business,
             high_spike_active=False,
         )
@@ -422,6 +435,36 @@ def main() -> None:
     df = df.drop_duplicates(subset=["business_day", "hour_business"], keep="last")
     if len(df) < before:
         logger.info("Dedup: %d → %d rows", before, len(df))
+
+    # ── Load negative risk path ──────────────────────────────────────
+    negative_risk_path: Path | None = None
+    if args.negative_risk_path is not None:
+        neg_path = Path(args.negative_risk_path)
+        if neg_path.exists():
+            logger.info("Loading negative risk: %s", neg_path)
+            neg_risk_df = pd.read_csv(neg_path)
+            for col in ("business_day",):
+                if col in neg_risk_df.columns:
+                    neg_risk_df[col] = neg_risk_df[col].astype(str)
+            merge_cols = [c for c in ["business_day", "hour_business",
+                                       "negative_prob", "low_valley_prob",
+                                       "overestimate_low_prob"]
+                         if c in neg_risk_df.columns]
+            if len(merge_cols) >= 4:
+                df = pd.merge(df, neg_risk_df[merge_cols],
+                              on=["business_day", "hour_business"],
+                              how="left", suffixes=("", "_risk"))
+                # Fill missing risk with 0
+                for c in ["negative_prob", "low_valley_prob", "overestimate_low_prob"]:
+                    if c in df.columns:
+                        df[c] = df[c].fillna(0.0)
+                logger.info("Merged negative risk: %d rows, cols=%s",
+                           len(df), merge_cols)
+                negative_risk_path = neg_path
+            else:
+                logger.warning("Negative risk CSV missing required columns")
+        else:
+            logger.warning("Negative risk path not found: %s", neg_path)
 
     # Determine spike risk path
     spike_risk_path = args.spike_risk_path

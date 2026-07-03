@@ -386,10 +386,12 @@ class ResidualStackOrchestrator:
                 continue
 
             # Try downward correction
+            neg_risk = float(row.get("negative_prob", 0.0))
+            lv_risk = float(row.get("low_valley_prob", 0.0))
             correction_result = corrector.compute_downward_correction(
                 base_pred=float(base_after_spike),
-                negative_risk=0.0,  # will use heuristic if no risk_model
-                low_valley_risk=0.0,
+                negative_risk=neg_risk,
+                low_valley_risk=lv_risk,
                 hour_business=int(hour_business),
                 high_spike_active=False,
             )

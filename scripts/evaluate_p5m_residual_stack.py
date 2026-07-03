@@ -54,6 +54,12 @@ from residual_stack.metrics import (
     format_metrics_table,
     compare_configs,
 )
+from residual_stack.risk_source import (
+    RiskSource,
+    detect_risk_source,
+    resolve_risk_policy,
+    format_risk_verdict,
+)
 from residual_stack.report import (
     generate_verdict,
     write_report,
@@ -104,6 +110,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional explicit spike risk CSV path. If not provided, "
         "assumes high_spike_prob is already in the canonical pack.",
     )
+    parser.add_argument(
+        "--allow-synthetic-risk",
+        action="store_true",
+        default=False,
+        help="Allow synthetic risk (high_spike_flag → 0.9/0.05) for "
+        "dry-run evaluation. Without this flag, configs B/D are "
+        "DATA-MISSING when only a binary flag is available.",
+    )
+    parser.add_argument(
+        "--negative-risk-path",
+        type=str,
+        default=None,
+        help="Path to negative risk predictions CSV (must contain "
+        "negative_prob, low_valley_prob, overestimate_low_prob). "
+        "If provided, these probabilities are used for Config C/D "
+        "negative correction instead of heuristic fallback.",
+    )
     return parser.parse_args(argv)
 
 
@@ -125,12 +148,15 @@ def _build_high_spike_only_metrics(
     df: pd.DataFrame,
     spike_risk_path: str | Path | None,
     spike_profile: str,
+    risk_source: RiskSource = RiskSource.MISSING,
+    allow_synthetic: bool = False,
 ) -> dict[str, Any]:
     """Config B: Phase2 + high_spike only.
 
-    Applies high-spike correction directly on *df* using the canonical
-    pack's existing ``high_spike_flag`` as a synthetic probability
-    (0.9 if flagged, 0.05 otherwise), or loads from *spike_risk_path*.
+    Loads spike probabilities from *spike_risk_path*, inline
+    ``high_spike_prob``, or (if *allow_synthetic*) ``high_spike_flag``.
+
+    Returns metrics dict with ``_risk_source`` / ``_run_status`` metadata.
     """
     out = df.copy()
     out["base_pred"] = out["base_fused_pred"].values
@@ -146,8 +172,23 @@ def _build_high_spike_only_metrics(
     elif "high_spike_prob" in out.columns:
         spike_probs = out["high_spike_prob"].fillna(0.0).values
     elif "high_spike_flag" in out.columns:
-        # Synthesise probability from flag
-        spike_probs = np.where(out["high_spike_flag"].astype(bool), 0.9, 0.05)
+        if allow_synthetic and risk_source == RiskSource.SYNTHETIC_FLAG:
+            # Dry-run: synthesise probability from flag
+            spike_probs = np.where(out["high_spike_flag"].astype(bool), 0.9, 0.05)
+        else:
+            # DATA-MISSING — no real spike risk data
+            out["after_high_spike_pred"] = out["base_fused_pred"].values
+            out["final_pred"] = out["base_fused_pred"].values
+            out["after_negative_pred"] = out["base_fused_pred"].values
+            out["high_spike_applied"] = False
+            out["negative_applied"] = False
+            out["correction_reason"] = "no_spike_signal"
+            out["module_sequence"] = "none"
+            m = compute_stack_metrics(out)
+            m["_risk_source"] = risk_source.value
+            m["_run_status"] = "data_missing"
+            m["_allow_synthetic"] = allow_synthetic
+            return m
     else:
         # No spike signal at all — skip correction
         out["after_high_spike_pred"] = out["base_fused_pred"].values
@@ -211,7 +252,12 @@ def _build_high_spike_only_metrics(
     out["correction_reason"] = [
         "high_spike_lifted" if l > 0 else "no_correction" for l in lift_list
     ]
-    return compute_stack_metrics(out)
+    m = compute_stack_metrics(out)
+    _, run_status = resolve_risk_policy(risk_source, allow_synthetic)
+    m["_risk_source"] = risk_source.value
+    m["_run_status"] = run_status
+    m["_allow_synthetic"] = allow_synthetic
+    return m
 
 
 def _build_negative_only_metrics(df: pd.DataFrame) -> dict[str, Any]:
@@ -259,10 +305,14 @@ def _build_negative_only_metrics(df: pd.DataFrame) -> dict[str, Any]:
         if pd.isna(base_pred_val):
             base_pred_val = 0.0
 
+        # Use calibrated negative risk if available, else heuristic fallback
+        neg_risk = float(row.get("negative_prob", 0.0))
+        lv_risk = float(row.get("low_valley_prob", 0.0))
+
         result = corrector.compute_downward_correction(
             base_pred=base_pred_val,
-            negative_risk=0.0,
-            low_valley_risk=0.0,
+            negative_risk=neg_risk,
+            low_valley_risk=lv_risk,
             hour_business=hour_business,
             high_spike_active=False,
         )
@@ -292,8 +342,13 @@ def _build_unified_stack_metrics(
     spike_risk_path: str | Path | None,
     spike_profile: str,
     negative_profile: str,
+    risk_source: RiskSource = RiskSource.MISSING,
+    allow_synthetic: bool = False,
 ) -> dict[str, Any]:
-    """Config D: Phase2 + high_spike + negative residual unified stack."""
+    """Config D: Phase2 + high_spike + negative residual unified stack.
+
+    Returns metrics dict with ``_risk_source`` / ``_run_status`` metadata.
+    """
     # Build synthetic spike risk CSV if none was provided but we have a flag
     import tempfile
 
@@ -313,13 +368,23 @@ def _build_unified_stack_metrics(
             risk_df.to_csv(tmp_risk, index=False)
             effective_risk_path = tmp_risk
         elif "high_spike_flag" in df.columns:
-            risk_df = df[["business_day", "hour_business"]].copy()
-            risk_df["high_spike_prob"] = np.where(
-                df["high_spike_flag"].astype(bool), 0.9, 0.05
-            )
-            tmp_risk = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w").name
-            risk_df.to_csv(tmp_risk, index=False)
-            effective_risk_path = tmp_risk
+            if allow_synthetic and risk_source == RiskSource.SYNTHETIC_FLAG:
+                risk_df = df[["business_day", "hour_business"]].copy()
+                risk_df["high_spike_prob"] = np.where(
+                    df["high_spike_flag"].astype(bool), 0.9, 0.05
+                )
+                tmp_risk = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w").name
+                risk_df.to_csv(tmp_risk, index=False)
+                effective_risk_path = tmp_risk
+            else:
+                # DATA-MISSING — no real spike risk data
+                tmp_risk = None
+                md: dict[str, Any] = {}
+                md["_risk_source"] = risk_source.value
+                md["_run_status"] = "data_missing"
+                md["_allow_synthetic"] = allow_synthetic
+                Path(tmp_pack_path).unlink(missing_ok=True)
+                return md
         else:
             effective_risk_path = None
 
@@ -334,7 +399,12 @@ def _build_unified_stack_metrics(
             spike_risk_path=effective_risk_path,
             profile=profile,
         )
-        return compute_stack_metrics(result.df)
+        m = compute_stack_metrics(result.df)
+        _, run_status = resolve_risk_policy(risk_source, allow_synthetic)
+        m["_risk_source"] = risk_source.value
+        m["_run_status"] = run_status
+        m["_allow_synthetic"] = allow_synthetic
+        return m
     finally:
         Path(tmp_pack_path).unlink(missing_ok=True)
         if tmp_risk is not None:
@@ -366,6 +436,36 @@ def main() -> None:
     if len(df) < before:
         logger.info("Dedup: %d → %d rows", before, len(df))
 
+    # ── Load negative risk path ──────────────────────────────────────
+    negative_risk_path: Path | None = None
+    if args.negative_risk_path is not None:
+        neg_path = Path(args.negative_risk_path)
+        if neg_path.exists():
+            logger.info("Loading negative risk: %s", neg_path)
+            neg_risk_df = pd.read_csv(neg_path)
+            for col in ("business_day",):
+                if col in neg_risk_df.columns:
+                    neg_risk_df[col] = neg_risk_df[col].astype(str)
+            merge_cols = [c for c in ["business_day", "hour_business",
+                                       "negative_prob", "low_valley_prob",
+                                       "overestimate_low_prob"]
+                         if c in neg_risk_df.columns]
+            if len(merge_cols) >= 4:
+                df = pd.merge(df, neg_risk_df[merge_cols],
+                              on=["business_day", "hour_business"],
+                              how="left", suffixes=("", "_risk"))
+                # Fill missing risk with 0
+                for c in ["negative_prob", "low_valley_prob", "overestimate_low_prob"]:
+                    if c in df.columns:
+                        df[c] = df[c].fillna(0.0)
+                logger.info("Merged negative risk: %d rows, cols=%s",
+                           len(df), merge_cols)
+                negative_risk_path = neg_path
+            else:
+                logger.warning("Negative risk CSV missing required columns")
+        else:
+            logger.warning("Negative risk path not found: %s", neg_path)
+
     # Determine spike risk path
     spike_risk_path = args.spike_risk_path
     if spike_risk_path is not None:
@@ -374,16 +474,33 @@ def main() -> None:
             logger.warning("Spike risk path not found, using inline high_spike_prob")
             spike_risk_path = None
 
+    # ── Detect risk source ─────────────────────────────────────────
+    risk_source = detect_risk_source(
+        spike_risk_path=str(spike_risk_path) if spike_risk_path else None,
+        df=df,
+    )
+    _, rs = resolve_risk_policy(risk_source, args.allow_synthetic_risk)
+    logger.info(
+        "Risk source: %s → %s (allow_synthetic=%s)",
+        risk_source.value, rs, args.allow_synthetic_risk,
+    )
+
     # ── Config A: Baseline ─────────────────────────────────────────
     logger.info("Config A: Phase2 baseline")
     metrics_a = _build_baseline_metrics(df)
+    metrics_a["_risk_source"] = risk_source.value
+    metrics_a["_run_status"] = "official"  # A doesn't use spike risk
+    metrics_a["_allow_synthetic"] = args.allow_synthetic_risk
     df_a = df.copy()
     df_a["config"] = "A_baseline"
     df_a.to_csv(corrected_dir / "config_A_baseline.csv", index=False)
 
     # ── Config B: High-spike only ──────────────────────────────────
-    logger.info("Config B: high_spike only")
-    metrics_b = _build_high_spike_only_metrics(df, spike_risk_path, args.high_spike_profile)
+    logger.info("Config B: high_spike only (risk=%s)", risk_source.value)
+    metrics_b = _build_high_spike_only_metrics(
+        df, spike_risk_path, args.high_spike_profile,
+        risk_source=risk_source, allow_synthetic=args.allow_synthetic_risk,
+    )
     df_b = df.copy()
     df_b["config"] = "B_high_spike_only"
     df_b.to_csv(corrected_dir / "config_B_high_spike_only.csv", index=False)
@@ -391,11 +508,15 @@ def main() -> None:
     # ── Config C: Negative only ────────────────────────────────────
     logger.info("Config C: negative residual only")
     metrics_c = _build_negative_only_metrics(df)
+    metrics_c["_risk_source"] = risk_source.value
+    metrics_c["_run_status"] = "official"  # C doesn't use spike risk
+    metrics_c["_allow_synthetic"] = args.allow_synthetic_risk
 
     # ── Config D: Unified stack ────────────────────────────────────
-    logger.info("Config D: unified residual stack")
+    logger.info("Config D: unified residual stack (risk=%s)", risk_source.value)
     metrics_d = _build_unified_stack_metrics(
         df, spike_risk_path, args.high_spike_profile, args.negative_profile,
+        risk_source=risk_source, allow_synthetic=args.allow_synthetic_risk,
     )
 
     # ── Build comparison ───────────────────────────────────────────
@@ -434,18 +555,27 @@ def main() -> None:
     print("Residual Stack Evaluation Summary")
     print("=" * 60)
     for label, metrics in configs.items():
-        verdict = generate_verdict(metrics)
-        print(f"\n[{label}] Verdict: {verdict}")
+        run_status = metrics.get("_run_status", "official")
+        raw = generate_verdict(metrics, run_status=run_status)
+        prefixed = format_risk_verdict(run_status, raw)
+        print(f"\n[{label}] Verdict: {prefixed}")
+        print(f"  Risk source: {metrics.get('_risk_source', 'unknown')} | Status: {run_status}")
         print(format_metrics_table(metrics))
     print("\n" + "=" * 60)
 
-    # Final overall verdict
-    overall_verdicts = [generate_verdict(m) for m in configs.values()]
-    if all(v == "GO" for v in overall_verdicts):
+    # Final overall verdict from official results only
+    official_raw = [
+        generate_verdict(m, run_status=m.get("_run_status", "official"))
+        for m in configs.values()
+        if m.get("_run_status") == "official"
+    ]
+    if not official_raw:
+        print("Overall: NO-OFFICIAL-RESULTS — no config had official risk data")
+    elif all(v == "GO" for v in official_raw):
         print("Overall: GO")
-    elif any(v == "DATA-LIMITED" for v in overall_verdicts):
-        print("Overall: DATA-LIMITED — negative samples too few")
-    elif any(v.startswith("NO-GO") for v in overall_verdicts):
+    elif any("DATA-MISSING" in v or "DATA-LIMITED" in v for v in official_raw):
+        print("Overall: DATA-MISSING")
+    elif any(v.startswith("NO-GO") for v in official_raw):
         print("Overall: NO-GO — see details above")
     else:
         print("Overall: MIXED")

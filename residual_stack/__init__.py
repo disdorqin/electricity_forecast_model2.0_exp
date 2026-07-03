@@ -56,6 +56,13 @@ from residual_stack.metrics import (
     compare_configs,
     format_metrics_table,
 )
+from residual_stack.risk_source import (
+    RiskSource,
+    detect_risk_source,
+    is_official_source,
+    resolve_risk_policy,
+    format_risk_verdict,
+)
 
 __all__ = [
     # schema
@@ -74,4 +81,10 @@ __all__ = [
     "compute_stack_metrics",
     "compare_configs",
     "format_metrics_table",
+    # risk source
+    "RiskSource",
+    "detect_risk_source",
+    "is_official_source",
+    "resolve_risk_policy",
+    "format_risk_verdict",
 ]

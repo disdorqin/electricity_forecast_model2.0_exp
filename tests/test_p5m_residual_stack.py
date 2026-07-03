@@ -268,11 +268,11 @@ class TestVerdict:
     def test_go_when_metrics_good(self):
         metrics = {
             "data_limited": False,
-            "overall_sMAPE_delta": 0.1,
+            "overall_sMAPE_improvement": -0.1,
             "severe_underestimate": 50,
             "severe_underestimate_before": 60,
-            "high_spike_MAE_delta_pct": 1.0,
-            "low_valley_MAE_delta": -5.0,
+            "high_spike_MAE_improvement": -1.0,
+            "low_valley_MAE_improvement": 5.0,
             "normal_degradation": 0.2,
         }
         assert generate_verdict(metrics) == "GO"
@@ -280,10 +280,10 @@ class TestVerdict:
     def test_no_go_when_smape_worsens(self):
         metrics = {
             "data_limited": False,
-            "overall_sMAPE_delta": 0.5,
+            "overall_sMAPE_improvement": -0.5,
             "severe_underestimate": 50,
-            "high_spike_MAE_delta_pct": 1.0,
-            "low_valley_MAE_delta": -5.0,
+            "high_spike_MAE_improvement": -1.0,
+            "low_valley_MAE_improvement": 5.0,
             "normal_degradation": 0.2,
         }
         assert "NO-GO" in generate_verdict(metrics)
@@ -292,24 +292,24 @@ class TestVerdict:
         """Baseline with delta=0 should be GO (no regression)."""
         metrics = {
             "data_limited": False,
-            "overall_sMAPE_delta": 0.0,
-            "low_valley_MAE_delta": 0.0,
-            "high_spike_MAE_delta_pct": 0.0,
+            "overall_sMAPE_improvement": 0.0,
+            "low_valley_MAE_improvement": 0.0,
+            "high_spike_MAE_improvement": 0.0,
             "normal_degradation": 0.0,
         }
         assert generate_verdict(metrics) == "GO"
 
     def test_no_go_when_low_valley_worsens(self):
-        """Positive low_valley_MAE_delta should trigger NO-GO."""
+        """Negative low_valley_MAE_improvement should trigger NO-GO."""
         metrics = {
             "data_limited": False,
-            "overall_sMAPE_delta": 0.1,
-            "low_valley_MAE_delta": 5.0,
-            "high_spike_MAE_delta_pct": 1.0,
+            "overall_sMAPE_improvement": -0.1,
+            "low_valley_MAE_improvement": -5.0,
+            "high_spike_MAE_improvement": -1.0,
             "normal_degradation": 0.2,
         }
         assert "NO-GO" in generate_verdict(metrics)
-        assert "worsened" in generate_verdict(metrics)
+        assert "worse" in generate_verdict(metrics)
 
     def test_data_limited_when_few_samples(self):
         metrics = {
@@ -321,9 +321,225 @@ class TestVerdict:
     def test_no_go_when_high_spike_degraded(self):
         metrics = {
             "data_limited": False,
-            "overall_sMAPE_delta": 0.1,
-            "high_spike_MAE_delta_pct": 5.0,
-            "low_valley_MAE_delta": -1.0,
+            "overall_sMAPE_improvement": -0.1,
+            "high_spike_MAE_improvement": -5.0,
+            "low_valley_MAE_improvement": 1.0,
             "normal_degradation": 0.1,
         }
         assert "NO-GO" in generate_verdict(metrics)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. Risk source policy (PR #18 verification)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestRiskSourceDetection:
+    """RiskSource enum and detect_risk_source() classification."""
+
+    def test_real_prob_from_path(self):
+        from residual_stack.risk_source import detect_risk_source, RiskSource
+        assert detect_risk_source(spike_risk_path="/some/path/risk.csv") == RiskSource.REAL_PROB
+
+    def test_calibrated_prob_from_column(self):
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, RiskSource
+        df = pd.DataFrame({"high_spike_prob": [0.1]})
+        assert detect_risk_source(None, df) == RiskSource.CALIBRATED_PROB
+
+    def test_synthetic_from_flag(self):
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, RiskSource
+        df = pd.DataFrame({"high_spike_flag": [1]})
+        assert detect_risk_source(None, df) == RiskSource.SYNTHETIC_FLAG
+
+    def test_missing_when_no_data(self):
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, RiskSource
+        df = pd.DataFrame({"base_fused_pred": [1.0]})
+        assert detect_risk_source(None, df) == RiskSource.MISSING
+
+
+class TestRiskSourcePolicy:
+    """resolve_risk_policy — DATA-MISSING / DRY-RUN / OFFICIAL."""
+
+    def test_no_spike_risk_path_is_data_missing(self):
+        """No spike_risk_path + no high_spike_prob column = MISSING = data_missing."""
+        from residual_stack.risk_source import detect_risk_source, resolve_risk_policy
+        src = detect_risk_source(None)
+        assert src.value == "missing"
+        can_run, status = resolve_risk_policy(src)
+        assert can_run is False
+        assert status == "data_missing"
+
+    def test_synthetic_flag_without_allow_is_data_missing(self):
+        """high_spike_flag without --allow-synthetic-risk = data_missing."""
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, resolve_risk_policy
+        src = detect_risk_source(None, pd.DataFrame({"high_spike_flag": [1]}))
+        assert src == src.SYNTHETIC_FLAG
+        can_run, status = resolve_risk_policy(src, allow_synthetic=False)
+        assert can_run is False
+        assert status == "data_missing"
+
+    def test_synthetic_flag_with_allow_is_dry_run(self):
+        """high_spike_flag with --allow-synthetic-risk = dry_run."""
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, resolve_risk_policy
+        src = detect_risk_source(None, pd.DataFrame({"high_spike_flag": [1]}))
+        can_run, status = resolve_risk_policy(src, allow_synthetic=True)
+        assert can_run is True
+        assert status == "dry_run"
+
+    def test_calibrated_prob_is_official(self):
+        """high_spike_prob column without path = CALIBRATED_PROB = official."""
+        import pandas as pd
+        from residual_stack.risk_source import detect_risk_source, resolve_risk_policy
+        src = detect_risk_source(None, pd.DataFrame({"high_spike_prob": [0.5]}))
+        assert src == src.CALIBRATED_PROB
+        can_run, status = resolve_risk_policy(src)
+        assert can_run is True
+        assert status == "official"
+
+    def test_real_prob_is_official(self):
+        """Explicit spike_risk_path = REAL_PROB = official."""
+        from residual_stack.risk_source import detect_risk_source, resolve_risk_policy
+        src = detect_risk_source("/real/path/risk.csv")
+        assert src == src.REAL_PROB
+        can_run, status = resolve_risk_policy(src)
+        assert can_run is True
+        assert status == "official"
+
+
+class TestRiskSourceAwareVerdict:
+    """generate_verdict with run_status — OFFICIAL GO/NO-GO vs DATA-MISSING."""
+
+    def test_data_missing_returns_immediately(self):
+        from residual_stack.report import generate_verdict
+        v = generate_verdict({"data_limited": False}, run_status="data_missing")
+        assert v == "DATA-MISSING"
+
+    def test_data_missing_overrides_data_limited(self):
+        from residual_stack.report import generate_verdict
+        v = generate_verdict({"data_limited": True, "negative_count": 2}, run_status="data_missing")
+        assert v == "DATA-MISSING"
+
+    def test_official_go(self):
+        from residual_stack.report import generate_verdict
+        v = generate_verdict({
+            "data_limited": False, "overall_sMAPE_improvement": -0.1,
+            "low_valley_MAE_improvement": 2.0, "high_spike_MAE_improvement": -1.0,
+            "normal_degradation": 0.2,
+        }, run_status="official")
+        assert v == "GO"
+
+    def test_official_no_go(self):
+        from residual_stack.report import generate_verdict
+        v = generate_verdict({
+            "data_limited": False, "overall_sMAPE_improvement": -0.5,
+            "low_valley_MAE_improvement": 2.0, "high_spike_MAE_improvement": -1.0,
+            "normal_degradation": 0.2,
+        }, run_status="official")
+        assert "NO-GO" in v
+
+
+class TestRiskSourceReport:
+    """write_report risk source section and overall verdict."""
+
+    def test_report_risk_source_policy_section(self):
+        import json, tempfile
+        from pathlib import Path
+        from residual_stack.report import write_report
+        m_official = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "high_spike_MAE_improvement": 0.0, "normal_degradation": 0.0,
+            "_risk_source": "real_prob", "_run_status": "official", "_allow_synthetic": False}
+        m_missing = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "high_spike_MAE_improvement": 0.0, "normal_degradation": 0.0,
+            "_risk_source": "synthetic_flag", "_run_status": "data_missing", "_allow_synthetic": False}
+        with tempfile.TemporaryDirectory() as d:
+            write_report(d, {"A": m_official, "B": m_missing})
+            r = json.load(open(Path(d) / "residual_stack_report.json"))
+        assert "risk_source_policy" in r
+        assert r["risk_source_policy"]["A"]["risk_source"] == "real_prob"
+        assert r["risk_source_policy"]["B"]["risk_source"] == "synthetic_flag"
+        assert r["risk_source_policy"]["B"]["run_status"] == "data_missing"
+
+    def test_overall_verdict_from_official_only(self):
+        """Overall GO when official passes, ignoring data_missing."""
+        import json, tempfile
+        from pathlib import Path
+        from residual_stack.report import write_report
+        m_go = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "high_spike_MAE_improvement": 0.0, "normal_degradation": 0.0,
+            "_risk_source": "real_prob", "_run_status": "official", "_allow_synthetic": False}
+        m_dm = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "_risk_source": "missing", "_run_status": "data_missing", "_allow_synthetic": False}
+        with tempfile.TemporaryDirectory() as d:
+            write_report(d, {"A": m_go, "B": m_dm})
+            r = json.load(open(Path(d) / "residual_stack_report.json"))
+        assert r["overall_verdict"] == "GO"
+        assert r["verdicts"]["B"] == "[data-missing] DATA-MISSING"
+
+    def test_no_official_results(self):
+        """When no configs are official → NO-OFFICIAL-RESULTS."""
+        import json, tempfile
+        from pathlib import Path
+        from residual_stack.report import write_report
+        m = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "_risk_source": "missing", "_run_status": "data_missing", "_allow_synthetic": False}
+        with tempfile.TemporaryDirectory() as d:
+            write_report(d, {"B": m})
+            r = json.load(open(Path(d) / "residual_stack_report.json"))
+        assert r["overall_verdict"] == "NO-OFFICIAL-RESULTS"
+
+    def test_dry_run_excluded_from_overall(self):
+        """dry-run configs are excluded from overall verdict."""
+        import json, tempfile
+        from pathlib import Path
+        from residual_stack.report import write_report
+        m_official = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "high_spike_MAE_improvement": 0.0, "normal_degradation": 0.0,
+            "_risk_source": "real_prob", "_run_status": "official", "_allow_synthetic": False}
+        m_dry = {"overall_sMAPE_improvement": 0.5, "low_valley_MAE_improvement": 5.0,
+            "high_spike_MAE_improvement": 10.0, "normal_degradation": 2.0,
+            "_risk_source": "synthetic_flag", "_run_status": "dry_run", "_allow_synthetic": True}
+        with tempfile.TemporaryDirectory() as d:
+            write_report(d, {"A": m_official, "B": m_dry})
+            r = json.load(open(Path(d) / "residual_stack_report.json"))
+        assert r["overall_verdict"] == "GO"  # official A passes, dry B excluded
+        assert "[dry-run]" in r["verdicts"]["B"]
+
+    def test_data_missing_verdict_string(self):
+        from residual_stack.report import write_report
+        import json, tempfile
+        from pathlib import Path
+        m = {"overall_sMAPE_improvement": 0.0, "low_valley_MAE_improvement": 0.0,
+            "_risk_source": "missing", "_run_status": "data_missing", "_allow_synthetic": False}
+        with tempfile.TemporaryDirectory() as d:
+            write_report(d, {"B": m})
+            r = json.load(open(Path(d) / "residual_stack_report.json"))
+        assert r["verdicts"]["B"] == "[data-missing] DATA-MISSING"
+
+
+class TestOrchestratorRiskSource:
+    """StackResult carries risk_source and run_status."""
+
+    def test_orchestrator_detects_risk_source(self):
+        """Orchestrator.run() returns StackResult with risk_source."""
+        from residual_stack.orchestrator import ResidualStackOrchestrator
+        import tempfile
+        import pandas as pd
+        df = pd.DataFrame({
+            "business_day": ["2026-07-01"], "hour_business": [1],
+            "base_fused_pred": [50.0], "y_true": [55.0],
+        })
+        tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w")
+        df.to_csv(tmp, index=False)
+        tmp.close()
+        orch = ResidualStackOrchestrator()
+        result = orch.run(tmp.name)
+        from residual_stack.risk_source import RiskSource
+        assert hasattr(result, "risk_source")
+        assert hasattr(result, "run_status")
+        assert result.risk_source == RiskSource.MISSING
+        assert result.run_status == "data_missing"

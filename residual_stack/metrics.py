@@ -85,12 +85,12 @@ def compute_stack_metrics(
         metrics["negative_MAE_after"] = 0.0
 
     if metrics.get("negative_MAE_before", 0) > 0:
-        metrics["negative_MAE_delta"] = round(
-            (metrics["negative_MAE_after"] - metrics["negative_MAE_before"])
+        metrics["negative_MAE_improvement"] = round(
+            (metrics["negative_MAE_before"] - metrics["negative_MAE_after"])
             / metrics["negative_MAE_before"] * 100, 2
         )
     else:
-        metrics["negative_MAE_delta"] = 0.0
+        metrics["negative_MAE_improvement"] = 0.0
 
     # ── Low valley MAE ─────────────────────────────────────────────
     if metrics["low_valley_count"] > 0:
@@ -105,12 +105,12 @@ def compute_stack_metrics(
         metrics["low_valley_MAE_after"] = 0.0
 
     if metrics.get("low_valley_MAE_before", 0) > 0:
-        metrics["low_valley_MAE_delta"] = round(
-            (metrics["low_valley_MAE_after"] - metrics["low_valley_MAE_before"])
+        metrics["low_valley_MAE_improvement"] = round(
+            (metrics["low_valley_MAE_before"] - metrics["low_valley_MAE_after"])
             / metrics["low_valley_MAE_before"] * 100, 2
         )
     else:
-        metrics["low_valley_MAE_delta"] = 0.0
+        metrics["low_valley_MAE_improvement"] = 0.0
 
     # ── Negative miss (y_true < 0 but y_pred >= 0) ─────────────────
     metrics["negative_miss_before"] = int(np.sum((y_true < 0) & (before >= 0)))
@@ -138,7 +138,7 @@ def compute_stack_metrics(
     smape_after = _smape(y_true, after)
     metrics["overall_sMAPE_before"] = round(smape_before, 4)
     metrics["overall_sMAPE_after"] = round(smape_after, 4)
-    metrics["overall_sMAPE_delta"] = round(smape_after - smape_before, 4)
+    metrics["overall_sMAPE_improvement"] = round(smape_before - smape_after, 4)
 
     # ── High spike MAE ─────────────────────────────────────────────
     if metrics["high_spike_count"] > 0:
@@ -153,12 +153,12 @@ def compute_stack_metrics(
         metrics["high_spike_MAE_after"] = 0.0
 
     if metrics.get("high_spike_MAE_before", 0) > 0:
-        metrics["high_spike_MAE_delta_pct"] = round(
-            (metrics["high_spike_MAE_after"] - metrics["high_spike_MAE_before"])
+        metrics["high_spike_MAE_improvement"] = round(
+            (metrics["high_spike_MAE_before"] - metrics["high_spike_MAE_after"])
             / metrics["high_spike_MAE_before"] * 100, 2
         )
     else:
-        metrics["high_spike_MAE_delta_pct"] = 0.0
+        metrics["high_spike_MAE_improvement"] = 0.0
 
     # ── False lift rate ────────────────────────────────────────────
     if "high_spike_applied" in df.columns:
@@ -235,12 +235,12 @@ def format_metrics_table(metrics: dict[str, Any]) -> str:
     key_order = [
         "negative_count", "low_valley_count", "high_spike_count",
         "severe_underestimate",
-        "negative_MAE_before", "negative_MAE_after", "negative_MAE_delta",
-        "low_valley_MAE_before", "low_valley_MAE_after", "low_valley_MAE_delta",
+        "negative_MAE_before", "negative_MAE_after", "negative_MAE_improvement",
+        "low_valley_MAE_before", "low_valley_MAE_after", "low_valley_MAE_improvement",
         "negative_miss_before", "negative_miss_after",
         "low_valley_overestimate_before", "low_valley_overestimate_after",
-        "overall_sMAPE_before", "overall_sMAPE_after", "overall_sMAPE_delta",
-        "high_spike_MAE_before", "high_spike_MAE_after", "high_spike_MAE_delta_pct",
+        "overall_sMAPE_before", "overall_sMAPE_after", "overall_sMAPE_improvement",
+        "high_spike_MAE_before", "high_spike_MAE_after", "high_spike_MAE_improvement",
         "false_lift_rate",
         "normal_sMAPE_before", "normal_sMAPE_after", "normal_degradation",
         "data_limited",

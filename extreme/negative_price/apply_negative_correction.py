@@ -157,7 +157,7 @@ def apply_negative_correction(
     df = pd.read_csv(prediction_pack_path)
 
     # Engineer features
-    feat_df = engineer_negative_price_features(df, pred_col=pred_col)
+    feat_df = engineer_negative_price_features(df, pred_col=pred_col, history_df=history_df)
 
     # ── Risk estimation ────────────────────────────────────────────
     if risk_model is not None and risk_model.is_fitted:
@@ -269,12 +269,13 @@ def compute_metrics(
     """Compute evaluation metrics for negative correction.
 
     Metrics:
+        - negative_count / low_valley_count
         - negative_MAE_before / after
         - low_valley_MAE_before / after
-        - negative_miss_count_before / after
-        - low_valley_overestimate_count_before / after
-        - overall_sMAPE_before / after
-        - high_spike_MAE_before / after
+        - negative_miss_before / after
+        - low_valley_overestimate_before / after
+        - overall_sMAPE_before / after / delta
+        - high_spike_MAE_before / after / delta
         - normal_degradation
 
     Args:
@@ -296,40 +297,45 @@ def compute_metrics(
     is_9_16 = df["hour_business"].between(9, 16).values
     is_normal = ~is_9_16
 
-    # Negative price events (y_true < 0)
+    # Counts
     neg_mask = y_true < 0
-    if neg_mask.sum() > 0:
+    lv_mask = y_true <= 50
+    metrics["negative_count"] = int(neg_mask.sum())
+    metrics["low_valley_count"] = int(lv_mask.sum())
+
+    # Negative price MAE
+    if metrics["negative_count"] > 0:
         metrics["negative_MAE_before"] = float(np.mean(np.abs(y_true[neg_mask] - before[neg_mask])))
         metrics["negative_MAE_after"] = float(np.mean(np.abs(y_true[neg_mask] - after[neg_mask])))
     else:
         metrics["negative_MAE_before"] = 0.0
         metrics["negative_MAE_after"] = 0.0
 
-    # Low valley events (y_true <= 50)
-    lv_mask = y_true <= 50
-    if lv_mask.sum() > 0:
+    # Low valley MAE
+    if metrics["low_valley_count"] > 0:
         metrics["low_valley_MAE_before"] = float(np.mean(np.abs(y_true[lv_mask] - before[lv_mask])))
         metrics["low_valley_MAE_after"] = float(np.mean(np.abs(y_true[lv_mask] - after[lv_mask])))
     else:
         metrics["low_valley_MAE_before"] = 0.0
         metrics["low_valley_MAE_after"] = 0.0
 
-    # Negative miss count (y_true < 0 but y_pred >= 0)
-    metrics["negative_miss_count_before"] = int(np.sum((y_true < 0) & (before >= 0)))
-    metrics["negative_miss_count_after"] = int(np.sum((y_true < 0) & (after >= 0)))
+    # Negative miss (y_true < 0 but y_pred >= 0)
+    metrics["negative_miss_before"] = int(np.sum((y_true < 0) & (before >= 0)))
+    metrics["negative_miss_after"] = int(np.sum((y_true < 0) & (after >= 0)))
 
-    # Low valley overestimate count (y_pred - y_true >= 30 when y_true is low)
-    ov_mask = (y_true <= 50)
-    if ov_mask.sum() > 0:
-        metrics["low_valley_overestimate_before"] = int(np.sum((before[ov_mask] - y_true[ov_mask]) >= 30))
-        metrics["low_valley_overestimate_after"] = int(np.sum((after[ov_mask] - y_true[ov_mask]) >= 30))
+    # Low valley overestimate (y_pred - y_true >= 30 when y_true is low)
+    if metrics["low_valley_count"] > 0:
+        metrics["low_valley_overestimate_before"] = int(np.sum((before[lv_mask] - y_true[lv_mask]) >= 30))
+        metrics["low_valley_overestimate_after"] = int(np.sum((after[lv_mask] - y_true[lv_mask]) >= 30))
+    else:
+        metrics["low_valley_overestimate_before"] = 0
+        metrics["low_valley_overestimate_after"] = 0
 
     # Overall sMAPE (floor50)
     denom_before = (np.abs(y_true) + np.abs(before)) / 2.0
     denom_before = np.clip(denom_before, 50.0, None)
     smape_before = np.mean(np.abs(y_true - before) / denom_before * 100)
     metrics["overall_sMAPE_before"] = round(float(smape_before), 4)
-
     denom_after = (np.abs(y_true) + np.abs(after)) / 2.0
     denom_after = np.clip(denom_after, 50.0, None)
     smape_after = np.mean(np.abs(y_true - after) / denom_after * 100)
@@ -346,12 +352,12 @@ def compute_metrics(
         metrics["high_spike_MAE_after"] = 0.0
 
     if metrics.get("high_spike_MAE_before", 0) > 0:
-        metrics["high_spike_degradation"] = round(
+        metrics["high_spike_MAE_delta"] = round(
             (metrics["high_spike_MAE_after"] - metrics["high_spike_MAE_before"])
             / metrics["high_spike_MAE_before"] * 100, 2
         )
     else:
-        metrics["high_spike_degradation"] = 0.0
+        metrics["high_spike_MAE_delta"] = 0.0
 
     # Normal degradation (sMAPE delta for non-9_16 hours)
     if is_normal.sum() > 0:

@@ -156,8 +156,16 @@ def apply_negative_correction(
 
     df = pd.read_csv(prediction_pack_path)
 
+    # Preserve y_true before feature engineering (features may drop it)
+    _y_true_col = "y_true" if "y_true" in df.columns else None
+    _y_true_values = df[_y_true_col].copy() if _y_true_col is not None else None
+
     # Engineer features
     feat_df = engineer_negative_price_features(df, pred_col=pred_col, history_df=history_df)
+
+    # Restore y_true if it was dropped
+    if _y_true_col is not None and _y_true_col not in feat_df.columns and _y_true_values is not None:
+        feat_df[_y_true_col] = _y_true_values
 
     # ── Risk estimation ────────────────────────────────────────────
     if risk_model is not None and risk_model.is_fitted:

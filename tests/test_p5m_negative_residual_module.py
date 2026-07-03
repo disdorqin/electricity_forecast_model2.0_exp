@@ -269,8 +269,8 @@ class TestMetrics:
             "low_valley_MAE_before", "low_valley_MAE_after",
             "negative_miss_before", "negative_miss_after",
             "low_valley_overestimate_before", "low_valley_overestimate_after",
-            "overall_sMAPE_before", "overall_sMAPE_after", "overall_sMAPE_delta",
-            "high_spike_MAE_before", "high_spike_MAE_after", "high_spike_MAE_delta",
+            "overall_sMAPE_before", "overall_sMAPE_after", "overall_sMAPE_improvement",
+            "high_spike_MAE_before", "high_spike_MAE_after", "high_spike_MAE_improvement",
             "normal_degradation",
         ]
         for key in required:
@@ -312,7 +312,7 @@ class TestMetrics:
         df = sample_df_with_negatives.copy()
         df["final_pred"] = df["base_fused_pred"].values * 0.95
         metrics = compute_metrics(df)
-        assert abs(metrics["overall_sMAPE_delta"]) < 10.0
+        assert abs(metrics["overall_sMAPE_improvement"]) < 10.0
 
 
 # ── Integration tests ────────────────────────────────────────────────

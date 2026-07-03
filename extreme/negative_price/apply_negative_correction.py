@@ -39,6 +39,7 @@ from extreme.negative_price.risk_model import (
     NegativeRiskConfig,
     NegativeRiskModel,
     RiskTarget,
+    compute_heuristic_v2_risk,
 )
 
 
@@ -173,15 +174,14 @@ def apply_negative_correction(
         feat_df["negative_risk"] = risk_probas
         feat_df["low_valley_risk"] = risk_probas  # combined model
     else:
-        # Heuristic: use prediction percentile as risk proxy
-        if pred_col in feat_df.columns:
-            p10 = feat_df[pred_col].quantile(0.10)
-            p5 = feat_df[pred_col].quantile(0.05)
-            feat_df["negative_risk"] = (feat_df[pred_col] <= p5).astype(float)
-            feat_df["low_valley_risk"] = (feat_df[pred_col] <= p10).astype(float)
-        else:
-            feat_df["negative_risk"] = 0.0
-            feat_df["low_valley_risk"] = 0.0
+        # Use heuristic_v2 (continuous, multi-signal) by default
+        heur = compute_heuristic_v2_risk(
+            df if history_df is None else df,
+            history_df=history_df,
+            pred_col=pred_col,
+        )
+        feat_df["negative_risk"] = heur["negative_prob"].values
+        feat_df["low_valley_risk"] = heur["low_valley_prob"].values
 
     # ── Residual corrector ─────────────────────────────────────────
     corrector = NegativeResidualCorrector(profile.to_residual_config())
@@ -282,9 +282,9 @@ def compute_metrics(
         - low_valley_MAE_before / after
         - negative_miss_before / after
         - low_valley_overestimate_before / after
-        - overall_sMAPE_before / after / delta
-        - high_spike_MAE_before / after / delta
-        - normal_degradation
+        - overall_sMAPE_before / after / improvement
+        - high_spike_MAE_before / after / improvement
+        - normal_degradation (positive = worse)
 
     Args:
         df: DataFrame with y_true, predictions before and after.
@@ -348,7 +348,7 @@ def compute_metrics(
     denom_after = np.clip(denom_after, 50.0, None)
     smape_after = np.mean(np.abs(y_true - after) / denom_after * 100)
     metrics["overall_sMAPE_after"] = round(float(smape_after), 4)
-    metrics["overall_sMAPE_delta"] = round(float(smape_after - smape_before), 4)
+    metrics["overall_sMAPE_improvement"] = round(float(smape_before - smape_after), 4)
 
     # High spike MAE (y_true > 150)
     spike_mask = y_true > 150
@@ -360,12 +360,12 @@ def compute_metrics(
         metrics["high_spike_MAE_after"] = 0.0
 
     if metrics.get("high_spike_MAE_before", 0) > 0:
-        metrics["high_spike_MAE_delta"] = round(
-            (metrics["high_spike_MAE_after"] - metrics["high_spike_MAE_before"])
+        metrics["high_spike_MAE_improvement"] = round(
+            (metrics["high_spike_MAE_before"] - metrics["high_spike_MAE_after"])
             / metrics["high_spike_MAE_before"] * 100, 2
         )
     else:
-        metrics["high_spike_MAE_delta"] = 0.0
+        metrics["high_spike_MAE_improvement"] = 0.0
 
     # Normal degradation (sMAPE delta for non-9_16 hours)
     if is_normal.sum() > 0:

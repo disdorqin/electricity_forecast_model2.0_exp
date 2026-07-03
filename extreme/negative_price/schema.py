@@ -43,6 +43,7 @@ SAFE_FEATURE_FAMILIES: Final[dict[str, list[str]]] = {
     "negative_risk_signals": [
         "recent_negative_rate_by_hour", "recent_negative_rate_by_period",
         "recent_low_price_rate_by_hour", "recent_low_price_rate_by_period",
+        "recent_mean_low_residual_by_hour",
         "min_pred_last_24h", "renewable_ratio",
     ],
 }

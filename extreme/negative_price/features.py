@@ -100,6 +100,27 @@ def engineer_negative_price_features(
         rate_df = pd.DataFrame({"pred": hist_pred, "hb": hb_lookup})
         if period_lookup is not None:
             rate_df["period"] = period_lookup
+
+        # Add residual info from history_df when available
+        if history_df is not None and "y_true" in history_df.columns:
+            rate_df["residual"] = (history_df["y_true"] - history_df[pred_col]).fillna(0.0)
+            # Mean residual in low-price regime per hour
+            low_mask = history_df["y_true"] <= 50
+            low_residual = rate_df.loc[low_mask.values, "residual"] if low_mask.any() else pd.Series([0.0])
+            hr_low_res = (
+                history_df.loc[low_mask.values, "hour_business"] if low_mask.any() else pd.Series(dtype=float)
+            )
+            if low_mask.any():
+                low_res_df = pd.DataFrame({"res": low_residual.values, "hb": hr_low_res.values})
+                hr_mean_low_res = low_res_df.groupby("hb")["res"].mean()
+                result["recent_mean_low_residual_by_hour"] = (
+                    result["hour_business"].map(hr_mean_low_res).fillna(0.0)
+                )
+            else:
+                result["recent_mean_low_residual_by_hour"] = 0.0
+        else:
+            result["recent_mean_low_residual_by_hour"] = 0.0
+
         hr_neg = rate_df.groupby("hb")["pred"].apply(_compute_negative_rate)
         result["recent_negative_rate_by_hour"] = result["hour_business"].map(hr_neg).fillna(0.0)
         if "period" in rate_df.columns:
@@ -115,6 +136,7 @@ def engineer_negative_price_features(
     else:
         for c in ["recent_negative_rate_by_hour", "recent_negative_rate_by_period",
                    "recent_low_price_rate_by_hour", "recent_low_price_rate_by_period",
+                   "recent_mean_low_residual_by_hour",
                    "min_pred_last_24h"]:
             result[c] = 0.0
 

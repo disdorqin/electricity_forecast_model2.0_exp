@@ -282,9 +282,9 @@ def compute_metrics(
         - low_valley_MAE_before / after
         - negative_miss_before / after
         - low_valley_overestimate_before / after
-        - overall_sMAPE_before / after / delta
-        - high_spike_MAE_before / after / delta
-        - normal_degradation
+        - overall_sMAPE_before / after / improvement
+        - high_spike_MAE_before / after / improvement
+        - normal_degradation (positive = worse)
 
     Args:
         df: DataFrame with y_true, predictions before and after.
@@ -348,7 +348,7 @@ def compute_metrics(
     denom_after = np.clip(denom_after, 50.0, None)
     smape_after = np.mean(np.abs(y_true - after) / denom_after * 100)
     metrics["overall_sMAPE_after"] = round(float(smape_after), 4)
-    metrics["overall_sMAPE_delta"] = round(float(smape_after - smape_before), 4)
+    metrics["overall_sMAPE_improvement"] = round(float(smape_before - smape_after), 4)
 
     # High spike MAE (y_true > 150)
     spike_mask = y_true > 150
@@ -360,12 +360,12 @@ def compute_metrics(
         metrics["high_spike_MAE_after"] = 0.0
 
     if metrics.get("high_spike_MAE_before", 0) > 0:
-        metrics["high_spike_MAE_delta"] = round(
-            (metrics["high_spike_MAE_after"] - metrics["high_spike_MAE_before"])
+        metrics["high_spike_MAE_improvement"] = round(
+            (metrics["high_spike_MAE_before"] - metrics["high_spike_MAE_after"])
             / metrics["high_spike_MAE_before"] * 100, 2
         )
     else:
-        metrics["high_spike_MAE_delta"] = 0.0
+        metrics["high_spike_MAE_improvement"] = 0.0
 
     # Normal degradation (sMAPE delta for non-9_16 hours)
     if is_normal.sum() > 0:

@@ -11,8 +11,12 @@ Monitors:
     negative_count, low_valley_count,
     negative_trigger_rate, low_valley_trigger_rate,
     high_spike_overlap_count, downward_correction_count,
-    normal_degradation, high_spike_degradation,
-    DATA_LIMITED flag
+    negative_MAE_improvement, low_valley_MAE_improvement,
+    overall_sMAPE_improvement, high_spike_MAE_improvement,
+    normal_degradation, DATA_LIMITED flag
+
+Delta convention: improvement = before - after, positive = better.
+normal_degradation: positive = worse (degradation).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ def monitor_health(
     out_dir: str | Path,
     profile_name: str = "conservative",
     pred_col: str = "base_fused_pred",
+    risk_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run health monitoring on the negative correction module.
 
@@ -48,6 +53,7 @@ def monitor_health(
         out_dir: Output directory.
         profile_name: Correction profile to use.
         pred_col: Column name for predictions.
+        risk_path: Optional pre-computed risk CSV (overrides heuristic_v2).
 
     Returns:
         Health report dict.
@@ -73,10 +79,17 @@ def monitor_health(
     # ── DATA_LIMITED check ───────────────────────────────────────────
     health["DATA_LIMITED"] = health["negative_count"] == 0
 
-    # ── Heuristic V2 trigger rates ───────────────────────────────────
-    heur = compute_heuristic_v2_risk(df, history_df=df, pred_col=pred_col)
-    neg_prob = heur.get("negative_prob", pd.Series(0.0))
-    lv_prob = heur.get("low_valley_prob", pd.Series(0.0))
+    # ── Risk scores (from CSV or heuristic_v2) ──────────────────────
+    if risk_path is not None:
+        risk_df = pd.read_csv(risk_path)
+        neg_prob = risk_df.get("negative_prob", pd.Series(0.0))
+        lv_prob = risk_df.get("low_valley_prob", pd.Series(0.0))
+        health["risk_source"] = "from_csv"
+    else:
+        heur = compute_heuristic_v2_risk(df, history_df=df, pred_col=pred_col)
+        neg_prob = heur.get("negative_prob", pd.Series(0.0))
+        lv_prob = heur.get("low_valley_prob", pd.Series(0.0))
+        health["risk_source"] = "heuristic_v2"
 
     for thresh in [0.2, 0.3, 0.4, 0.5]:
         health[f"negative_trigger_rate_{thresh}"] = round(float((neg_prob > thresh).mean()), 4)
@@ -109,21 +122,21 @@ def monitor_health(
     health["downward_correction_count"] = int(
         (result_df.get("downward_amount", pd.Series(0.0)) < -1e-6).sum()
     )
-    health["negative_MAE_delta"] = metrics.get("negative_MAE_before", 0) - metrics.get("negative_MAE_after", 0)
-    health["low_valley_MAE_delta"] = metrics.get("low_valley_MAE_before", 0) - metrics.get("low_valley_MAE_after", 0)
-    health["overall_sMAPE_delta"] = metrics.get("overall_sMAPE_delta", 0)
-    health["high_spike_MAE_delta"] = metrics.get("high_spike_MAE_delta", 0)
+    health["negative_MAE_improvement"] = metrics.get("negative_MAE_before", 0) - metrics.get("negative_MAE_after", 0)
+    health["low_valley_MAE_improvement"] = metrics.get("low_valley_MAE_before", 0) - metrics.get("low_valley_MAE_after", 0)
+    health["overall_sMAPE_improvement"] = metrics.get("overall_sMAPE_improvement", 0)
+    health["high_spike_MAE_improvement"] = metrics.get("high_spike_MAE_improvement", 0)
     health["normal_degradation"] = metrics.get("normal_degradation", 0)
 
     # ── GO / NO-GO / DATA-LIMITED ──────────────────────────────────
     if health["DATA_LIMITED"]:
         health["verdict"] = "DATA-LIMITED"
-        if health["low_valley_MAE_delta"] >= 0 and abs(health["overall_sMAPE_delta"]) <= 0.3:
+        if health["low_valley_MAE_improvement"] >= 0 and health["overall_sMAPE_improvement"] >= -0.3:
             health["verdict"] = "DATA-LIMITED (LV ok)"
     else:
-        neg_ok = health["negative_MAE_delta"] >= 0 or health["low_valley_MAE_delta"] >= 0
-        smape_ok = abs(health["overall_sMAPE_delta"]) <= 0.3
-        hs_ok = abs(health["high_spike_MAE_delta"]) <= 3.0
+        neg_ok = health["negative_MAE_improvement"] >= 0 or health["low_valley_MAE_improvement"] >= 0
+        smape_ok = health["overall_sMAPE_improvement"] >= -0.3
+        hs_ok = health["high_spike_MAE_improvement"] >= -3.0
         norm_ok = health["normal_degradation"] <= 0.5
         health["verdict"] = "GO" if (neg_ok and smape_ok and hs_ok and norm_ok) else "NO-GO"
 
@@ -165,10 +178,10 @@ def _format_markdown(health: dict[str, Any]) -> str:
         f"- **Downward corrections applied:** {health.get('downward_correction_count', 'N/A')}",
         "",
         "## Correction Impact",
-        f"- **Negative MAE delta:** {health.get('negative_MAE_delta', 'N/A'):+.2f}",
-        f"- **Low valley MAE delta:** {health.get('low_valley_MAE_delta', 'N/A'):+.2f}",
-        f"- **Overall sMAPE delta:** {health.get('overall_sMAPE_delta', 'N/A'):+.4f}",
-        f"- **High spike MAE delta:** {health.get('high_spike_MAE_delta', 'N/A'):+.2f}%",
+        f"- **Negative MAE improvement:** {health.get('negative_MAE_improvement', 'N/A'):+.2f}",
+        f"- **Low valley MAE improvement:** {health.get('low_valley_MAE_improvement', 'N/A'):+.2f}",
+        f"- **Overall sMAPE improvement:** {health.get('overall_sMAPE_improvement', 'N/A'):+.4f}",
+        f"- **High spike MAE improvement:** {health.get('high_spike_MAE_improvement', 'N/A'):+.2f}%",
         f"- **Normal degradation:** {health.get('normal_degradation', 'N/A'):+.4f}",
         "",
         "## Verdict",
@@ -192,10 +205,10 @@ def _print_health(health: dict[str, Any]) -> None:
     print(f"  HS overlap:           {health.get('high_spike_overlap_count', 'N/A')}")
     print(f"  Downward corrs:       {health.get('downward_correction_count', 'N/A')}")
     print(f"  {'─'*55}")
-    print(f"  Neg MAE delta:        {health.get('negative_MAE_delta', 0):+.2f}")
-    print(f"  LV MAE delta:         {health.get('low_valley_MAE_delta', 0):+.2f}")
-    print(f"  sMAPE delta:          {health.get('overall_sMAPE_delta', 0):+.4f}")
-    print(f"  HS MAE delta:         {health.get('high_spike_MAE_delta', 0):+.2f}%")
+    print(f"  Neg MAE improvement:  {health.get('negative_MAE_improvement', 0):+.2f}")
+    print(f"  LV MAE improvement:   {health.get('low_valley_MAE_improvement', 0):+.2f}")
+    print(f"  sMAPE improvement:    {health.get('overall_sMAPE_improvement', 0):+.4f}")
+    print(f"  HS MAE improvement:   {health.get('high_spike_MAE_improvement', 0):+.2f}%")
     print(f"  Normal degradation:   {health.get('normal_degradation', 0):+.4f}")
     print(f"  {'─'*55}")
     print(f"  Verdict:              {health.get('verdict', 'UNKNOWN')}")
@@ -211,6 +224,7 @@ def main() -> None:
                         help="Correction profile")
     parser.add_argument("--quick", action="store_true", help="Quick mode (small window)")
     parser.add_argument("--pred-col", default="base_fused_pred", help="Prediction column name")
+    parser.add_argument("--risk-path", default=None, help="Path to pre-computed risk CSV")
     args = parser.parse_args()
 
     monitor_health(
@@ -218,6 +232,7 @@ def main() -> None:
         out_dir=args.out_dir,
         profile_name=args.profile,
         pred_col=args.pred_col,
+        risk_path=args.risk_path,
     )
 
 

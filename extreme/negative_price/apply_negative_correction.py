@@ -39,6 +39,7 @@ from extreme.negative_price.risk_model import (
     NegativeRiskConfig,
     NegativeRiskModel,
     RiskTarget,
+    compute_heuristic_v2_risk,
 )
 
 
@@ -173,15 +174,14 @@ def apply_negative_correction(
         feat_df["negative_risk"] = risk_probas
         feat_df["low_valley_risk"] = risk_probas  # combined model
     else:
-        # Heuristic: use prediction percentile as risk proxy
-        if pred_col in feat_df.columns:
-            p10 = feat_df[pred_col].quantile(0.10)
-            p5 = feat_df[pred_col].quantile(0.05)
-            feat_df["negative_risk"] = (feat_df[pred_col] <= p5).astype(float)
-            feat_df["low_valley_risk"] = (feat_df[pred_col] <= p10).astype(float)
-        else:
-            feat_df["negative_risk"] = 0.0
-            feat_df["low_valley_risk"] = 0.0
+        # Use heuristic_v2 (continuous, multi-signal) by default
+        heur = compute_heuristic_v2_risk(
+            df if history_df is None else df,
+            history_df=history_df,
+            pred_col=pred_col,
+        )
+        feat_df["negative_risk"] = heur["negative_prob"].values
+        feat_df["low_valley_risk"] = heur["low_valley_prob"].values
 
     # ── Residual corrector ─────────────────────────────────────────
     corrector = NegativeResidualCorrector(profile.to_residual_config())

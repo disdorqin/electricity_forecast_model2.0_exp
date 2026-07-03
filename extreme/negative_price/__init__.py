@@ -62,6 +62,9 @@ from extreme.negative_price.risk_model import (
     NegativeRiskConfig,
     RiskTarget,
     fit_risk_model,
+    compute_heuristic_v2_risk,
+    RollingLowValleyScorer,
+    RollingMLConfig,
 )
 
 from extreme.negative_price.residual_correction import (

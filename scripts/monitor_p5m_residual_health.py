@@ -39,6 +39,7 @@ def monitor_health(
     canonical_pack_path: str | Path,
     out_dir: str | Path,
     profile_name: str = "conservative",
+    pred_col: str = "base_fused_pred",
 ) -> dict[str, Any]:
     """Run health monitoring on the negative correction module.
 
@@ -46,6 +47,7 @@ def monitor_health(
         canonical_pack_path: Path to canonical evaluation pack CSV.
         out_dir: Output directory.
         profile_name: Correction profile to use.
+        pred_col: Column name for predictions.
 
     Returns:
         Health report dict.
@@ -54,7 +56,7 @@ def monitor_health(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(canonical_pack_path)
-    df = add_all_labels(df)
+    df = add_all_labels(df, y_pred_col=pred_col)
 
     health: dict[str, Any] = {
         "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -72,7 +74,7 @@ def monitor_health(
     health["DATA_LIMITED"] = health["negative_count"] == 0
 
     # ── Heuristic V2 trigger rates ───────────────────────────────────
-    heur = compute_heuristic_v2_risk(df, history_df=df)
+    heur = compute_heuristic_v2_risk(df, history_df=df, pred_col=pred_col)
     neg_prob = heur.get("negative_prob", pd.Series(0.0))
     lv_prob = heur.get("low_valley_prob", pd.Series(0.0))
 
@@ -99,7 +101,7 @@ def monitor_health(
         prediction_pack_path=canonical_pack_path,
         history_df=df,
         profile=profile,
-        pred_col="base_fused_pred",
+        pred_col=pred_col,
     )
 
     metrics = compute_metrics(result_df)
@@ -208,12 +210,14 @@ def main() -> None:
     parser.add_argument("--profile", default="conservative", choices=["conservative", "moderate", "aggressive"],
                         help="Correction profile")
     parser.add_argument("--quick", action="store_true", help="Quick mode (small window)")
+    parser.add_argument("--pred-col", default="base_fused_pred", help="Prediction column name")
     args = parser.parse_args()
 
     monitor_health(
         canonical_pack_path=args.canonical_pack,
         out_dir=args.out_dir,
         profile_name=args.profile,
+        pred_col=args.pred_col,
     )
 
 

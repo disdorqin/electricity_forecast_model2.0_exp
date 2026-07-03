@@ -112,8 +112,8 @@ def run_calibration(
             continue
         print(f"  {name:<20} neg_prob_mean={s.get('neg_prob_mean', 'N/A')}")
         print(f"  {'':<20} lv_prob_mean={s.get('lv_prob_mean', 'N/A')}")
-        print(f"  {'':<20} trigger_neg={s.get('trigger_rate_neg', 'N/A')} (at p>0.3)")
-        print(f"  {'':<20} trigger_lv={s.get('trigger_rate_lv', 'N/A')} (at p>0.3)")
+        print(f"  {'':<20} trigger_neg={s.get('trigger_rate_neg_0.3', 'N/A')} (at p>0.3)")
+        print(f"  {'':<20} trigger_lv={s.get('trigger_rate_lv_0.3', 'N/A')} (at p>0.3)")
 
     print(f"\n  Output: {out_dir}/")
     return summary

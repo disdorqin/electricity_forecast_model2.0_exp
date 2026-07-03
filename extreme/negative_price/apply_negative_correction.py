@@ -321,8 +321,8 @@ def compute_metrics(
     # Low valley overestimate count (y_pred - y_true >= 30 when y_true is low)
     ov_mask = (y_true <= 50)
     if ov_mask.sum() > 0:
-        metrics["low_valley_overestimate_before"] = int(np.sum((after[ov_mask] - y_true[ov_mask]) >= 30))
-        metrics["low_valley_overestimate_after"] = int(np.sum((before[ov_mask] - y_true[ov_mask]) >= 30))
+        metrics["low_valley_overestimate_before"] = int(np.sum((before[ov_mask] - y_true[ov_mask]) >= 30))
+        metrics["low_valley_overestimate_after"] = int(np.sum((after[ov_mask] - y_true[ov_mask]) >= 30))
 
     # Overall sMAPE (floor50)
     denom_before = (np.abs(y_true) + np.abs(before)) / 2.0

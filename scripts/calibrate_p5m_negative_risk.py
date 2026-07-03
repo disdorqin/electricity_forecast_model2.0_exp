@@ -38,6 +38,7 @@ def run_calibration(
     canonical_pack_path: str | Path,
     out_dir: str | Path,
     max_days: int = 0,
+    pred_col: str = "base_fused_pred",
 ) -> dict[str, Any]:
     """Run calibration on the canonical pack.
 
@@ -45,6 +46,7 @@ def run_calibration(
         canonical_pack_path: Path to canonical evaluation pack CSV.
         out_dir: Output directory.
         max_days: Max days to process (0 = all).
+        pred_col: Column name for predictions (used for labels).
 
     Returns:
         Summary dict with trigger rates and file paths.
@@ -57,7 +59,7 @@ def run_calibration(
         days = sorted(df["business_day"].unique())[:max_days]
         df = df[df["business_day"].isin(days)].copy()
 
-    df = add_all_labels(df)
+    df = add_all_labels(df, y_pred_col=pred_col)
 
     summary: dict[str, Any] = {
         "canonical_pack": str(canonical_pack_path),
@@ -70,7 +72,7 @@ def run_calibration(
 
     # ── Heuristic V2 ─────────────────────────────────────────────────
     print("\n  Running heuristic_v2...")
-    heur = compute_heuristic_v2_risk(df, history_df=df)
+    heur = compute_heuristic_v2_risk(df, history_df=df, pred_col=pred_col)
     heur.to_csv(out_dir / "risk_heuristic_v2.csv", index=False)
     summary["scorers"]["heuristic_v2"] = _summarize_risk(heur, "heuristic_v2")
 
@@ -83,7 +85,7 @@ def run_calibration(
             min_train_samples=50,
         )
         scorer = RollingLowValleyScorer(config)
-        ml_result = scorer.fit_predict(df)
+        ml_result = scorer.fit_predict(df, pred_col=pred_col)
         ml_result.to_csv(out_dir / "risk_rolling_ml.csv", index=False)
         summary["scorers"]["rolling_ml"] = _summarize_risk(ml_result, "rolling_ml")
     except Exception as e:
@@ -147,12 +149,14 @@ def main() -> None:
     parser.add_argument("--canonical-pack", required=True, help="Path to canonical evaluation pack CSV")
     parser.add_argument("--out-dir", default="reports/local/p5m_calibration", help="Output directory")
     parser.add_argument("--max-days", type=int, default=0, help="Max days to process (0 = all)")
+    parser.add_argument("--pred-col", default="base_fused_pred", help="Prediction column name")
     args = parser.parse_args()
 
     run_calibration(
         canonical_pack_path=args.canonical_pack,
         out_dir=args.out_dir,
         max_days=args.max_days,
+        pred_col=args.pred_col,
     )
 
 

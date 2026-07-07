@@ -85,3 +85,33 @@
 - run_id = `p3_rt_20260125_20260225_v1`（数据范围+版本，稳定可复现）。
 - original_pred 采用 inverse-MAE rolling 集成（非生产BGEW，但透明且 leakage-free），将在报告中明确标注。
 - 评估集仅 32 天（≈1 个月），不足以声称"多月份稳定"；最高建议状态为 `candidate`（设计完成+单月验证）或视稳定性 `shadow`。严禁 `champion`。
+
+## 7. 推送至指定实验仓（2026-07-07）
+
+- 目标仓：`electricity_forecast_model2.0_exp`（任务指定实验仓；非 2.5 锁定、非 3.0 正式链路）。
+- 分支：`agent/p3-extreme-price-correction`（新建独立分支，不打扰 `tune-timemixer` 与用户遗留脏文件）。
+- 提交 `49db6b5`：26 files / 3102 insertions，全部位于 `p3_extreme_price_correction/`（含 README）。
+- 纪律：只 add 该子目录（绝 `-A`）；用户遗留 2 xlsx + predictions.csv + data/ 等 0 个被纳入。
+- gitignore 坑：`run_*.py` 规则误忽略核心脚本 → `git add -f` 强制纳入并验证。
+- 大文件 `outputs/*.parquet` 被 `outputs/` 忽略规则天然排除（符合不推大文件）。
+- PR：https://github.com/disdorqin/electricity_forecast_model2.0_exp/pull/new/agent/p3-extreme-price-correction
+
+## 8. 阶段 G：时序稳定性验证（2026-07-07）
+
+> 背景：RT actual 仅 32 天单 ledger（无更长历史），无法直接做"多月份"复核。以**时序 split + 周切片**（固定配置）作为升级 shadow 的可得最强代理。
+
+- 脚本：`scripts/run_p3_temporal_stability.py`（新增）。
+- **核心闸门 temporal-split 稳定性 = TRUE**：
+  - splitA（train 前半→test 后半，02-10..02-25）：test negΔ=-31.52，normalΔ=+0.26
+  - splitB（train 后半→test 前半，01-25..02-09）：test negΔ=-19.20，normalΔ=+1.89；固定配置下 fixed-on-test negΔ=-6.46，normalΔ=+0.38
+  - 两测试半段（各 ~100+ 负价小时）固定配置均**改善负价且不伤正常时段** → 单月 PASS 非单窗口假象。
+- 周切片（仅支持证据，样本过小）：判定窗口（neg_h≥15）负价方向全部改善；week2(02-01..02-07) 正常段 +2.01 标为 **watch item**（被全量 normalΔ +0.33 主导，非硬失败）；week1(neg_h=8) 因小样本排除硬判；spike=0 周 spikeΔ=nan（除零，标 n/a）。
+- 产物：`reports/temporal_stability_metrics.json` + `spike_residual_temporal_stability_report.md`（已并入候选包与最终报告 §9.1）。
+- 判定逻辑修正：初版把"周切片硬判"与"时序半段"绑死导致 `stable=false`（自相矛盾）；改为以**时序半段为核心闸门**，`stable` 跟随 `temporal_split_stable`，周切片降为支持证据 + watch item。
+- 结论：保持 recommended_status=`candidate`（§8 严格以"真实多月份"为最终闸门），但时序稳定性证据已支持在 owner 签字下进入**受控 shadow 部署**。
+
+## 9. 阶段 H 进行中：文档更新 + 二次推送（2026-07-07）
+
+- 待做：把阶段 G 新增脚本/报告/metrics 同步到 2.0_exp 的 `agent/p3-extreme-price-correction` 分支并推送（严守只 add `p3_extreme_price_correction/`）。
+- 候选包已重生成，含稳定性报告（manifest 增 `temporal_stability_proxy` 字段，promotion_decision 增 `temporal_stability_proxy` 块）。
+

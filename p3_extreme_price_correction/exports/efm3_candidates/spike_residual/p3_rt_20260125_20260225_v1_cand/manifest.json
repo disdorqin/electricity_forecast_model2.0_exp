@@ -1,10 +1,10 @@
 {
   "run_id": "p3_rt_20260125_20260225_v1_cand",
-  "created_at": "2026-07-06T11:04:20.010653+00:00",
+  "created_at": "2026-07-07T03:21:54.698215+00:00",
   "source_repo": "electricity_price_forecast3.0 (efm3.0)",
-  "source_commit": "ea57e025e1096edaaba4ef8617d4070a78c0a081",
+  "source_commit": "463dd95e6c2aa9905157b3cec63a648cda89e1e2",
   "experience_source_repo": "electricity_forecast_model2.0_exp",
-  "experience_source_commit": "530dd2930782253876d441cbb5dcaac253b99cd5",
+  "experience_source_commit": "49db6b5665fc34b953c32556976acfdfab98772c",
   "target_task": "spike_residual",
   "module_name": "ExtremePriceCorrectionSystem",
   "module_version": "p3_v1_candidate",
@@ -26,5 +26,6 @@
   "hour_completeness_check": "passed",
   "correction_cap": "CAP_ABS=350, CAP_RATIO=0.35 (negative: abs+price-floor only; spike/resid: +ratio)",
   "rollback_enabled": true,
-  "shadow_only": true
+  "shadow_only": true,
+  "temporal_stability_proxy": "passed (temporal_split_stable=true; single 32-day ledger, no multi-month available)"
 }

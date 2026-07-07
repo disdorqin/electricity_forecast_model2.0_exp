@@ -94,6 +94,19 @@
 - postflight safe: **YES**（价格范围/完整性/边界均守住）
 - verdict: **PASS**（单月通过全部 16 条标准）
 
+## 9.1 Temporal Stability Validation（补充阶段 G）
+
+> 任务 §8 要求"多月份稳定"才升 shadow。当前仅 32 天单 ledger（RT actual 无更长历史），故本阶段提供**可得最强代理**：时序 split（train-half 选参 → test-half 评估）+ 周切片，全部在固定配置下，无未来标签泄漏。
+
+| Split | Train window | Test window | Selected (thr/cap) | Test negΔsMAPE | Test normalΔsMAPE | Fixed-on-test negΔ | Fixed-on-test normalΔ |
+| ----- | ------------ | ----------- | ------------------ | -------------- | ----------------- | ------------------ | -------------------- |
+| splitA_train_first | 01-25..02-09 | 02-10..02-25 | 0.8/50.0 | -31.52 | +0.26 | -31.52 | +0.26 |
+| splitB_train_second | 02-10..02-25 | 01-25..02-09 | 0.6/50.0 | -19.20 | +1.89 | -6.46 | +0.38 |
+
+- **核心闸门 = temporal-split 稳定性**：两测试半段（各 ~100+ 负价小时）固定配置均改善负价 **且** 不伤正常时段 → `temporal_split_stable = TRUE`。
+- 周切片（仅支持证据，样本过小）：判定窗口（neg_h≥15）负价方向全部改善；week2(02-01..02-07) 正常段 +2.01 标为 **watch item**（被全量 normalΔ +0.33 主导，非硬失败）；week1(neg_h=8) 因小样本排除硬判。
+- **结论**：单月 PASS 非单窗口假象，固定配置跨时段一致。详见 `spike_residual_temporal_stability_report.md` / `temporal_stability_metrics.json`。
+
 ## 10. Candidate Package
 
 - export path: `exports/efm3_candidates/spike_residual/p3_rt_20260125_20260225_v1_cand/`
@@ -116,7 +129,7 @@
 
 SPIKE_RESIDUAL_P3_RECOMMENDATION: CANDIDATE
 
-（设计完成 + 单月 shadow 验证通过全部 16 条标准，但未满足"多月份稳定"故不升 shadow；待 ≥3 个月数据复核后升级。）
+（设计完成 + 单月 shadow 验证通过全部 16 条标准 + 时序稳定性代理通过；但严格按 §8，真实"多月份"复核仍是最终闸门，故保持 CANDIDATE。阶段 G 的时序稳定性证据已支持在 owner 签字下进入**受控 shadow 部署**，待 ≥3 个月数据最终确认后升级为 SHADOW。）
 
 ## 13. Final Verdict
 

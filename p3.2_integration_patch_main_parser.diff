@@ -1,0 +1,108 @@
+diff --git a/cli/parser.py b/cli/parser.py
+index 9685004..7be9523 100644
+--- a/cli/parser.py
++++ b/cli/parser.py
+@@ -79,7 +79,8 @@ def normalize_date_args(args: argparse.Namespace, parser: argparse.ArgumentParse
+         if datetime.strptime(args.start, "%Y-%m-%d") > datetime.strptime(args.end, "%Y-%m-%d"):
+             parser.error(f"--start ({args.start}) must be <= --end ({args.end})")
+     elif args.pipeline in ("ledger_full", "ledger_predict", "ledger_weight",
+-                           "ledger_fuse", "ledger_classifier", "ledger_smoke"):
++                           "ledger_fuse", "ledger_classifier", "ledger_smoke",
++                           "extreme_price_shadow"):
+         if not args.date:
+             parser.error(f"--pipeline {args.pipeline} requires --date (or positional date)")
+     elif args.pipeline == "ledger_backfill":
+@@ -112,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
+             "ledger_full",
+             "ledger_full_range",
+             "ledger_smoke",
++            "extreme_price_shadow",
+         ],
+     )
+     parser.add_argument("--target", default="both", choices=["dayahead", "realtime", "both"])
+@@ -143,6 +145,24 @@ def build_parser() -> argparse.ArgumentParser:
+     parser.add_argument("--recent-week-max-gate", type=float, default=0.85, help="Maximum day_gate with recent-week boost")
+     parser.add_argument("--weight-max-lookback-days", type=int, default=90, help="Maximum calendar days to look back when selecting complete realtime training days (default 90)")
+ 
++    # --- P3.2 Extreme Price Shadow (controlled, default OFF) ---
++    parser.add_argument(
++        "--enable-extreme-price-shadow", action="store_true", default=False,
++        help="Run the P3.2 Extreme Price Correction as a CONTROLLED SHADOW (default OFF). "
++             "Writes ONLY to outputs/runs/{date}/extreme_price_shadow/; never writes "
++             "submission_ready.csv or final outputs. Safe no-op unless explicitly set.",
++    )
++    parser.add_argument(
++        "--shadow-only", action="store_true", default=False,
++        help="Reaffirm shadow-only observation mode. The shadow is ALWAYS shadow-only "
++             "(corrected values never replace the original fused realtime prediction); "
++             "this flag makes the intent explicit.",
++    )
++    parser.add_argument(
++        "--extreme-price-shadow-config", default=None,
++        help="Path to extreme_price_shadow.yaml (defaults to configs/extreme_price_shadow.yaml).",
++    )
++
+     # TimeMixer tuning
+     parser.add_argument("--timemixer-epochs", type=int, default=80)
+     parser.add_argument("--timemixer-patience", type=int, default=15)
+diff --git a/main.py b/main.py
+index cd980d2..c9a0daf 100644
+--- a/main.py
++++ b/main.py
+@@ -22,6 +22,10 @@ from pipelines.ledger_classifier import run_ledger_classifier
+ from pipelines.ledger_full import run_ledger_full
+ from pipelines.ledger_full_range import run_ledger_full_range
+ from pipelines.ledger_smoke import run_ledger_smoke
++from pipelines.extreme_price_shadow import (
++    run_ledger_extreme_price_shadow,
++    run_extreme_price_shadow_safe,
++)
+ 
+ 
+ def _delivery_exit_code(delivery_status: str, default: int = 1) -> int:
+@@ -68,6 +72,33 @@ def main() -> int:
+             args.data_path = synced_xlsx
+         print(f"sync_dataset: OK (source={sync_result.get('source', '?')}, rows={sync_result.get('rows', 0)})", flush=True)
+ 
++    exit_code = _dispatch_pipeline(args)
++
++    # --- P3.2 controlled shadow post-step (default OFF) ---
++    # Runs only when --enable-extreme-price-shadow is explicitly passed. It reads
++    # realtime fused predictions from the 3.0 run + ledger and writes ONLY to
++    # outputs/runs/{date}/extreme_price_shadow/. It never writes final/ or
++    # submission_ready.csv, never replaces the original fused realtime prediction,
++    # and failures are caught here so the main chain is never affected.
++    if getattr(args, "enable_extreme_price_shadow", False):
++        try:
++            shadow_manifest = run_extreme_price_shadow_safe(args)
++            logger = logging.getLogger(__name__)
++            logger.info(
++                f"[extreme_price_shadow] status={shadow_manifest.get('status')} | "
++                f"shadow_only={shadow_manifest.get('shadow_only')} | "
++                f"final_contaminated={shadow_manifest.get('final_contaminated', False)} | "
++                f"main_chain_affected={shadow_manifest.get('main_chain_affected', False)}"
++            )
++        except Exception as e:  # pragma: no cover - defensive
++            logging.getLogger(__name__).exception(
++                f"[extreme_price_shadow] hook error (main chain untouched): {e}"
++            )
++    return exit_code
++
++
++def _dispatch_pipeline(args) -> int:
++    """Dispatch to the selected pipeline. Returns the process exit code."""
+     if args.pipeline == "evaluate":
+         output_path = run_evaluate_pipeline(args)
+         print(output_path)
+@@ -126,6 +157,11 @@ def main() -> int:
+         result = run_ledger_smoke(args)
+         print(f"ledger_smoke complete: {result}")
+         return 0
++    if args.pipeline == "extreme_price_shadow":
++        # P3.2 controlled shadow (default OFF; only reached when explicitly selected)
++        result = run_ledger_extreme_price_shadow(args)
++        print(f"extreme_price_shadow complete: {result}")
++        return 0
+     return 0
+ 
+ 

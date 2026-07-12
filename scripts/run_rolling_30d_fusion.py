@@ -70,10 +70,19 @@ except ImportError:
 
 # ── Constants ────────────────────────────────────────────────────────────
 
-FUSION_MODES = ["convex", "ridge", "softmax", "anchor"]
+FUSION_MODES = [
+    "convex", "ridge", "softmax", "anchor",
+    "severe_softmax", "severe_anchor", "quantile_guarded",
+]
 DEFAULT_TRAIN_WINDOW_DAYS = 30
 ANCHOR_MODEL = "lightgbm"
 ANCHOR_WEIGHT = 0.9  # default anchor weight for anchor mode
+SEVERE_ANCHOR_MIN = 0.85  # minimum LightGBM weight for severe_anchor mode
+DEFAULT_ALPHA = 1.0    # severe_softmax: severe underestimate penalty weight
+DEFAULT_BETA = 0.5     # severe_softmax: underprediction MAE penalty weight
+DEFAULT_RISK_THRESHOLD = 0.6  # quantile_guarded: spike risk probability threshold
+DEFAULT_SEVERE_RATE_THRESHOLD = 0.10  # quantile_guarded: recent severe rate threshold
+P75_LOOKBACK = 14  # quantile_guarded: lookback days for p75 calculation
 
 # Models expected in a multi-candidate pack
 BASELINE_MODELS = ["naive_lag1", "naive_lag7", "dayahead_proxy"]
@@ -226,6 +235,239 @@ def fit_anchor_weights(
     return result
 
 
+# ── P3.1 Severe-underestimate-aware weight fitters ─────────────────────
+
+
+def compute_severe_rate(
+    y_true: np.ndarray, y_pred: np.ndarray,
+) -> float:
+    """Fraction of timestamps where y_true - y_pred > 200."""
+    if len(y_true) == 0:
+        return 0.0
+    return float(np.mean(y_true - y_pred > 200))
+
+
+def compute_underprediction_mae(
+    y_true: np.ndarray, y_pred: np.ndarray,
+) -> float:
+    """MAE on timestamps where y_pred < y_true (underprediction only)."""
+    mask = y_pred < y_true
+    if not mask.any():
+        return 0.0
+    return float(np.mean(np.abs(y_true[mask] - y_pred[mask])))
+
+
+def fit_severe_softmax_weights(
+    train_preds: pd.DataFrame,
+    y_true_series: pd.Series,
+    models: list[str],
+    temperature: float = 0.1,
+    alpha: float = DEFAULT_ALPHA,
+    beta: float = DEFAULT_BETA,
+) -> dict[str, float]:
+    """Softmax weights with severe-underestimate penalty.
+
+    score_i = recent_smape_i + alpha * severe_rate_i
+              + beta * underprediction_mae_i / 200
+    weight_i ∝ exp(-temperature * normalized_score_i)
+    """
+    ytv = y_true_series.values
+    scores: dict[str, float] = {}
+    for model in models:
+        preds = train_preds[model].fillna(0).values
+
+        # sMAPE penalty
+        smape = float(np.nanmean(
+            compute_smape_floor50(y_true_series, pd.Series(preds))
+        ))
+
+        # Severe underestimate rate
+        severe_rate = compute_severe_rate(ytv, preds)
+
+        # Underprediction MAE (normalized by 200 to be comparable to sMAPE)
+        under_mae = compute_underprediction_mae(ytv, preds) / 200.0
+
+        composite = smape + alpha * severe_rate * 100.0 + beta * under_mae
+        scores[model] = composite  # lower is better
+
+    # Softmax over negative scores (lower composite -> higher weight)
+    arr = np.array([scores[m] for m in models])
+    s_min, s_max = arr.min(), arr.max()
+    if s_max - s_min > 1e-10:
+        arr_norm = (arr - s_min) / (s_max - s_min)
+    else:
+        arr_norm = np.zeros_like(arr)
+    exp_neg = np.exp(-arr_norm / max(temperature, 1e-10))
+    softmax = exp_neg / exp_neg.sum()
+    return dict(zip(models, softmax))
+
+
+def fit_severe_anchor_weights(
+    train_preds: pd.DataFrame,
+    y_true_series: pd.Series,
+    models: list[str],
+    anchor_model: str = ANCHOR_MODEL,
+    min_anchor_weight: float = SEVERE_ANCHOR_MIN,
+) -> dict[str, float]:
+    """LightGBM anchor >= min_anchor_weight; remaining weight only allocated
+    to baselines that reduce recent severe underestimate rate vs anchor alone.
+
+    For each baseline model, check if its severe_underestimate_rate is
+    <= the anchor's rate. If yes, share remaining weight proportionally
+    by inverse RMSE. If not, that baseline's share goes to the anchor.
+    """
+    if anchor_model not in models:
+        print(f"  [WARN] anchor_model='{anchor_model}' not in models; using equal weights")
+        return {m: 1.0 / len(models) for m in models}
+
+    ytv = y_true_series.values
+    anchor_preds = train_preds[anchor_model].fillna(0).values
+    anchor_severe_rate = compute_severe_rate(ytv, anchor_preds)
+    anchor_rmse = float(np.sqrt(np.mean((ytv - anchor_preds) ** 2)))
+
+    other_models = [m for m in models if m != anchor_model]
+    if len(other_models) == 0:
+        return {anchor_model: 1.0}
+
+    # Evaluate each baseline: does it reduce severe underestimates?
+    qualifying: list[str] = []
+    qualifying_rmse: dict[str, float] = {}
+    for m in other_models:
+        mp = train_preds[m].fillna(0).values
+        m_severe_rate = compute_severe_rate(ytv, mp)
+        m_rmse = float(np.sqrt(np.mean((ytv - mp) ** 2)))
+        if m_severe_rate <= anchor_severe_rate * 1.05:  # within 5% of anchor rate
+            qualifying.append(m)
+            qualifying_rmse[m] = m_rmse
+
+    remaining = 1.0 - min_anchor_weight
+    result = {anchor_model: min_anchor_weight}
+
+    if not qualifying or remaining <= 0:
+        result[anchor_model] = 1.0
+        for m in other_models:
+            result[m] = 0.0
+        return result
+
+    # Distribute remaining weight among qualifying baselines by inverse RMSE
+    inv_rmse = {m: 1.0 / max(qualifying_rmse[m], 1e-10) for m in qualifying}
+    total_inv = sum(inv_rmse.values())
+    for m in qualifying:
+        result[m] = remaining * inv_rmse[m] / total_inv
+    for m in other_models:
+        if m not in result:
+            result[m] = 0.0
+
+    return result
+
+
+def apply_quantile_guard(
+    predictions: pd.DataFrame,
+    pack: pd.DataFrame,
+    weights_df: pd.DataFrame,
+    models: list[str],
+    risk_df: pd.DataFrame | None = None,
+    risk_threshold: float = DEFAULT_RISK_THRESHOLD,
+    severe_rate_threshold: float = DEFAULT_SEVERE_RATE_THRESHOLD,
+    anchor_model: str = ANCHOR_MODEL,
+    p75_lookback: int = P75_LOOKBACK,
+) -> pd.DataFrame:
+    """Post-process predictions with upward quantile guard.
+
+    For high-risk, high-severe-rate, 9_16 hours only:
+        final_pred = max(base_fused_pred, lightgbm_pred * 1.05, base_fused_pred * 1.08)
+
+    Only targets the 9_16 period where severe underestimates are most costly.
+    Uses a gentler lift capped at 8% above base to avoid false lifts.
+    """
+    preds = predictions.copy()
+    preds["guarded"] = 0
+    preds["guard_source"] = "none"
+
+    # Pivot pack predictions (long -> wide for model columns)
+    pred_pivot = pack.pivot_table(
+        index=["business_day", "hour_business"],
+        columns="model_name", values="y_pred", aggfunc="first",
+    )
+    ytrue_series = pack.groupby(["business_day", "hour_business"])["y_true"].first()
+
+    # Merge risk scores if available
+    has_risk = risk_df is not None and not risk_df.empty
+    if has_risk:
+        risk_df = risk_df.copy()
+        risk_df["business_day"] = risk_df["business_day"].astype(str)
+
+    # Compute recent severe rate for each business_day
+    business_days = sorted(pack["business_day"].unique())
+    bd_to_severe_rate: dict[str, float] = {}
+    for day in business_days:
+        day_dt = pd.to_datetime(day)
+        lookback_start = day_dt - timedelta(days=p75_lookback)
+        lookback_end = day_dt - timedelta(days=1)
+        mask = (
+            (pack["business_day"] >= lookback_start.strftime("%Y-%m-%d"))
+            & (pack["business_day"] <= lookback_end.strftime("%Y-%m-%d"))
+        )
+        recent = pack[mask]
+        if not recent.empty and anchor_model in pred_pivot.columns:
+            recent_bds = recent["business_day"].unique()
+            recent_pivot = pred_pivot[pred_pivot.index.get_level_values("business_day").isin(recent_bds)]
+            common_idx = recent_pivot.index.intersection(ytrue_series.index)
+            if len(common_idx) > 0:
+                yt = ytrue_series.reindex(common_idx).values
+                yp = recent_pivot.loc[common_idx, anchor_model].values if anchor_model in recent_pivot.columns else yt
+                bd_to_severe_rate[day] = compute_severe_rate(yt, yp)
+            else:
+                bd_to_severe_rate[day] = 0.0
+        else:
+            bd_to_severe_rate[day] = 0.0
+
+    # Apply guard — only on 9_16 hours with high risk AND high severe rate
+    n_guarded = 0
+    for idx, row in preds.iterrows():
+        bd = row["business_day"]
+        hb = row["hour_business"]
+
+        # Only guard 9_16 period (peak hours)
+        period = row.get("period", get_period(int(hb)))
+        if period != "9_16":
+            continue
+
+        # Check risk
+        risk_high = False
+        if has_risk:
+            rmatch = risk_df[
+                (risk_df["business_day"] == bd)
+                & (risk_df["hour_business"] == hb)
+            ]
+            if not rmatch.empty:
+                risk_score = float(rmatch.iloc[0].get("spike_risk_score", 0))
+                risk_high = risk_score >= risk_threshold
+
+        # Check recent severe rate
+        severe_high = bd_to_severe_rate.get(bd, 0) >= severe_rate_threshold
+
+        if risk_high and severe_high:
+            try:
+                anchor_pred = float(pred_pivot.loc[(bd, hb), anchor_model])
+            except (KeyError, TypeError):
+                anchor_pred = 0.0
+
+            base_val = float(row["base_fused_pred"])
+            # Gentler lift: max(base, anchor*1.05, base*1.08)
+            gentle_lift = max(base_val * 1.08, anchor_pred * 1.05)
+            guarded_val = max(base_val, gentle_lift)
+
+            if guarded_val > base_val + 1e-6:
+                preds.at[idx, "base_fused_pred"] = round(min(guarded_val, base_val * 1.15), 4)  # cap at 15%
+                preds.at[idx, "guarded"] = 1
+                preds.at[idx, "guard_source"] = "quantile_guard"
+                n_guarded += 1
+
+    print(f"  Quantile guard applied: {n_guarded} timestamp(s) lifted (9_16 only, gentle)")
+    return preds
+
+
 # ── Aggregators ──────────────────────────────────────────────────────────
 
 def compute_per_day_weights(
@@ -238,6 +480,9 @@ def compute_per_day_weights(
     anchor_weight: float = ANCHOR_WEIGHT,
     temperature: float = 0.1,
     ridge_alpha: float = 1.0,
+    severe_alpha: float = DEFAULT_ALPHA,
+    severe_beta: float = DEFAULT_BETA,
+    severe_anchor_min: float = SEVERE_ANCHOR_MIN,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Compute rolling weights per business_day.
@@ -305,6 +550,16 @@ def compute_per_day_weights(
         elif fusion_mode == "anchor":
             w = fit_anchor_weights(train_pivot, train_ytrue_aligned, available_models,
                                    anchor_model=anchor_model, anchor_weight=anchor_weight)
+        elif fusion_mode == "severe_softmax":
+            w = fit_severe_softmax_weights(train_pivot, train_ytrue_aligned, available_models,
+                                           temperature=temperature, alpha=severe_alpha, beta=severe_beta)
+        elif fusion_mode == "severe_anchor":
+            w = fit_severe_anchor_weights(train_pivot, train_ytrue_aligned, available_models,
+                                          anchor_model=anchor_model, min_anchor_weight=severe_anchor_min)
+        elif fusion_mode == "quantile_guarded":
+            # quantile_guarded uses severe_softmax base weights for better severe control
+            w = fit_severe_softmax_weights(train_pivot, train_ytrue_aligned, available_models,
+                                           temperature=temperature, alpha=severe_alpha, beta=severe_beta)
         else:
             w = {m: 1.0 / len(available_models) for m in available_models}
 
@@ -562,6 +817,28 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--ridge-alpha", type=float, default=1.0,
         help="Ridge L2 regularisation alpha (default: 1.0)",
     )
+
+    # P3.1 Severe-aware params
+    parser.add_argument(
+        "--severe-alpha", type=float, default=DEFAULT_ALPHA,
+        help="Severe_softmax: severe underestimate penalty weight (default: 1.0)",
+    )
+    parser.add_argument(
+        "--severe-beta", type=float, default=DEFAULT_BETA,
+        help="Severe_softmax: underprediction MAE penalty weight (default: 0.5)",
+    )
+    parser.add_argument(
+        "--severe-anchor-min", type=float, default=SEVERE_ANCHOR_MIN,
+        help="Severe_anchor: minimum LightGBM anchor weight (default: 0.85)",
+    )
+    parser.add_argument(
+        "--risk-threshold", type=float, default=DEFAULT_RISK_THRESHOLD,
+        help="Quantile_guarded: spike risk probability threshold (default: 0.6)",
+    )
+    parser.add_argument(
+        "--severe-rate-threshold", type=float, default=DEFAULT_SEVERE_RATE_THRESHOLD,
+        help="Quantile_guarded: recent severe rate threshold (default: 0.10)",
+    )
     return parser.parse_args(argv)
 
 
@@ -603,6 +880,9 @@ def main() -> None:
         anchor_weight=args.anchor_weight,
         temperature=args.temperature,
         ridge_alpha=args.ridge_alpha,
+        severe_alpha=args.severe_alpha,
+        severe_beta=args.severe_beta,
+        severe_anchor_min=args.severe_anchor_min,
     )
     print(f"  -> {len(weights_df)} weight rows ({weights_df['business_day'].nunique()} days x {len(models)} models)")
 
@@ -610,6 +890,25 @@ def main() -> None:
     print(f"\n  Applying weights...")
     predictions = apply_weights(pack, weights_df, models)
     print(f"  -> {len(predictions)} prediction rows, 1 per timestamp")
+
+    # ── Quantile guard post-processing (quantile_guarded mode) ────────
+    if args.fusion_mode == "quantile_guarded":
+        print(f"\n  Applying quantile guard post-processing...")
+        risk_df = None
+        if args.risk_predictions:
+            risk_path = Path(args.risk_predictions)
+            if risk_path.exists():
+                risk_df = pd.read_csv(risk_path)
+                print(f"  Loaded risk predictions: {len(risk_df)} rows")
+            else:
+                print(f"  [WARN] Risk predictions not found: {risk_path}")
+
+        predictions = apply_quantile_guard(
+            predictions, pack, weights_df, models,
+            risk_df=risk_df,
+            risk_threshold=args.risk_threshold,
+            severe_rate_threshold=args.severe_rate_threshold,
+        )
 
     # ── Compute metrics ───────────────────────────────────────────────
     print(f"\n  Computing metrics (timestamp-level, deduplicated)...")
@@ -639,8 +938,13 @@ def main() -> None:
         "fusion_mode": args.fusion_mode,
         "models": models,
         "train_window_days": args.train_window_days,
-        "anchor_model": args.anchor_model if args.fusion_mode == "anchor" else None,
+        "anchor_model": args.anchor_model if args.fusion_mode in ("anchor", "severe_anchor") else None,
         "anchor_weight": args.anchor_weight if args.fusion_mode == "anchor" else None,
+        "severe_anchor_min": args.severe_anchor_min if args.fusion_mode == "severe_anchor" else None,
+        "severe_alpha": args.severe_alpha if args.fusion_mode == "severe_softmax" else None,
+        "severe_beta": args.severe_beta if args.fusion_mode == "severe_softmax" else None,
+        "risk_threshold": args.risk_threshold if args.fusion_mode == "quantile_guarded" else None,
+        "severe_rate_threshold": args.severe_rate_threshold if args.fusion_mode == "quantile_guarded" else None,
         "date_range": {"start": args.start_date, "end": args.end_date},
         "overall_metrics": overall,
         "n_weight_rows": len(weights_df),
@@ -651,7 +955,8 @@ def main() -> None:
         "note": (
             f"Rolling {args.train_window_days}D fusion: for each business_day D, "
             f"weights are fitted on [D-{args.train_window_days}, D-1] using y_true. "
-            f"Day D y_true never participates in fitting day D weights."
+            f"Day D y_true never participates in fitting day D weights. "
+            f"Mode: {args.fusion_mode}."
         ),
     }
     manifest_path = out_dir / "rolling_manifest.json"
